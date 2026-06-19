@@ -1,0 +1,386 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f5f7fa;
+  color: #2c3e50;
+  line-height: 1.6;
+}
+
+header {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  padding: 20px 30px;
+}
+
+header h1 {
+  font-size: 22px;
+  margin-bottom: 14px;
+  font-weight: 600;
+}
+
+nav {
+  display: flex;
+  gap: 6px;
+}
+
+.tab {
+  background: rgba(255,255,255,0.15);
+  color: #fff;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.tab:hover {
+  background: rgba(255,255,255,0.25);
+}
+
+.tab.active {
+  background: #f5f7fa;
+  color: #667eea;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.tab-content {
+  display: none;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+.tab-content h2 {
+  font-size: 20px;
+  margin-bottom: 16px;
+  color: #333;
+}
+
+.card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.card-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 768px) {
+  .card-row { grid-template-columns: 1fr; }
+}
+
+.card h3 {
+  font-size: 16px;
+  margin-bottom: 10px;
+  color: #444;
+}
+
+.hint {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 12px;
+}
+
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #555;
+  margin-bottom: 4px;
+}
+
+input[type="text"], select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: border-color 0.2s;
+}
+
+input[type="text"]:focus, select:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+button {
+  background: #667eea;
+  color: #fff;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.2s;
+  margin-right: 8px;
+  margin-top: 4px;
+}
+
+button:hover {
+  background: #5a6fd6;
+}
+
+button.secondary {
+  background: #e0e6f0;
+  color: #667eea;
+}
+
+button.secondary:hover {
+  background: #d0d8ea;
+}
+
+button.danger {
+  background: #e74c3c;
+}
+
+button.danger:hover {
+  background: #c0392b;
+}
+
+.sample {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 14px;
+  font-size: 13px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  overflow-x: auto;
+  white-space: pre;
+  color: #333;
+}
+
+.result-box {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  font-size: 14px;
+}
+
+.result-box.success {
+  border-left: 4px solid #27ae60;
+}
+
+.result-box.error {
+  border-left: 4px solid #e74c3c;
+}
+
+.result-box.warning {
+  border-left: 4px solid #f39c12;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.filter-bar select {
+  width: auto;
+  min-width: 150px;
+}
+
+.commits-list {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.commit-item {
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  transition: border-color 0.2s;
+}
+
+.commit-item:hover {
+  border-color: #667eea;
+}
+
+.commit-item.has-issues {
+  border-left: 3px solid #e74c3c;
+  background: #fef9f9;
+}
+
+.commit-item.reviewed {
+  border-left: 3px solid #27ae60;
+}
+
+.commit-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.commit-msg {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.commit-meta {
+  font-size: 12px;
+  color: #888;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.commit-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-feature { background: #e8f5e9; color: #2e7d32; }
+.badge-fix { background: #e3f2fd; color: #1565c0; }
+.badge-breaking { background: #fbe9e7; color: #c62828; }
+.badge-other { background: #f3e5f5; color: #6a1b9a; }
+.badge-ignored { background: #f5f5f5; color: #999; }
+
+.commit-issues {
+  margin-top: 6px;
+}
+
+.issue-item {
+  background: #fff3e0;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #e65100;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 6px;
+  margin-top: 4px;
+}
+
+.issue-item button {
+  padding: 1px 8px;
+  font-size: 11px;
+  margin: 0;
+}
+
+.commit-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.commit-actions button {
+  padding: 4px 12px;
+  font-size: 12px;
+  margin: 0;
+}
+
+.archive-item {
+  border: 1px solid #eee;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.archive-info {
+  font-weight: 500;
+}
+
+.archive-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+#archivesList {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: #fff;
+  border-radius: 10px;
+  padding: 24px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+}
+
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-size: 22px;
+  cursor: pointer;
+  color: #999;
+}
+
+.modal-close:hover {
+  color: #333;
+}
+
+#modalBody .form-group {
+  margin-bottom: 14px;
+}
+
+#exportResult pre {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 14px;
+  font-size: 13px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}

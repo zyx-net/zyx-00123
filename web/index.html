@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>发布说明整理工具</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>📋 发布说明整理工具</h1>
+    <nav>
+      <button class="tab active" data-tab="import">导入</button>
+      <button class="tab" data-tab="classify">分类</button>
+      <button class="tab" data-tab="review">复核</button>
+      <button class="tab" data-tab="archive">归档</button>
+      <button class="tab" data-tab="config">配置</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-import" class="tab-content active">
+      <h2>导入提交记录</h2>
+      <div class="card-row">
+        <div class="card">
+          <h3>从 Git 导入</h3>
+          <p class="hint">解析指定目录的 git log，自动提取提交信息</p>
+          <div class="form-group">
+            <label>Git 仓库目录</label>
+            <input type="text" id="gitDir" value="." placeholder="留空使用当前目录">
+          </div>
+          <button onclick="importGit()">导入 Git Log</button>
+        </div>
+        <div class="card">
+          <h3>从 CSV 导入</h3>
+          <p class="hint">CSV 需含表头，至少有 message 列，可选 hash, author, date, ticket, version</p>
+          <div class="form-group">
+            <label>CSV 文件路径</label>
+            <input type="text" id="csvFile" placeholder="例如: commits.csv">
+          </div>
+          <button onclick="importCsv()">导入 CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>样例 CSV 输入</h3>
+        <pre class="sample">hash,message,author,date,ticket,version
+abc1234,feat: 新增用户管理模块,张三,2025-01-15,PROJ-101,v1.2.0
+def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
+9abc012,breaking: 移除旧版 REST API,王五,2025-01-17,PROJ-103,v1.3.0
+3def456,docs: 更新 API 文档,赵六,2025-01-18,,v1.2.0
+789abcd,chore: 更新依赖版本,钱七,2025-01-19,PROJ-105,2.0</pre>
+      </div>
+      <div id="importResult" class="result-box hidden"></div>
+    </section>
+
+    <section id="tab-classify" class="tab-content">
+      <h2>自动分类</h2>
+      <div class="card">
+        <p>按配置的关键字、工单号规则、忽略模式和版本号规则自动分类提交到功能、修复、破坏性变更等栏目</p>
+        <button onclick="runClassify()">执行自动分类</button>
+        <button onclick="runValidate()" class="secondary">校验提交</button>
+      </div>
+      <div id="classifyResult" class="result-box hidden"></div>
+      <div id="validateResult" class="result-box hidden"></div>
+
+      <div class="card">
+        <h3>提交列表</h3>
+        <div class="filter-bar">
+          <select id="categoryFilter" onchange="loadCommits()">
+            <option value="">全部</option>
+            <option value="feature">✨ 功能</option>
+            <option value="fix">🐛 修复</option>
+            <option value="breaking">⚠ 破坏性变更</option>
+            <option value="other">📋 其他</option>
+            <option value="ignored">🚫 已忽略</option>
+          </select>
+          <button onclick="loadCommits()" class="secondary">刷新</button>
+        </div>
+        <div id="commitsList" class="commits-list"></div>
+      </div>
+    </section>
+
+    <section id="tab-review" class="tab-content">
+      <h2>人工复核</h2>
+      <div class="card-row">
+        <div class="card">
+          <h3>未复核提交</h3>
+          <button onclick="loadUnreviewed()" class="secondary">刷新列表</button>
+          <div id="unreviewedList" class="commits-list"></div>
+        </div>
+        <div class="card">
+          <h3>未解决问题</h3>
+          <button onclick="loadUnresolved()" class="secondary">刷新列表</button>
+          <div id="unresolvedList" class="commits-list"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>撤销操作</h3>
+        <div class="form-group">
+          <span id="undoPeek">可撤销操作: (加载中...)</span>
+        </div>
+        <button onclick="doUndo()" class="danger">撤销上一步</button>
+      </div>
+    </section>
+
+    <section id="tab-archive" class="tab-content">
+      <h2>版本归档与导出</h2>
+      <div class="card">
+        <h3>归档版本</h3>
+        <p class="hint">仅允许全部复核且无未解决校验问题时归档。归档后将保存完整快照（含来源提交和人工备注），后续规则改动不影响已归档内容。</p>
+        <div class="form-group">
+          <label>版本号</label>
+          <input type="text" id="archiveVersion" placeholder="例如: v1.2.0">
+        </div>
+        <button onclick="archiveVersion()">归档</button>
+      </div>
+      <div id="archiveResult" class="result-box hidden"></div>
+
+      <div class="card">
+        <h3>已归档版本</h3>
+        <button onclick="loadArchives()" class="secondary">刷新</button>
+        <div id="archivesList"></div>
+      </div>
+
+      <div class="card">
+        <h3>导出 Markdown</h3>
+        <div class="form-group">
+          <label>选择已归档版本</label>
+          <select id="exportVersion"></select>
+        </div>
+        <button onclick="exportMd()">导出 Markdown</button>
+        <button onclick="exportFile()" class="secondary">导出到文件</button>
+      </div>
+      <div id="exportResult" class="result-box hidden"></div>
+    </section>
+
+    <section id="tab-config" class="tab-content">
+      <h2>规则配置</h2>
+      <div class="card">
+        <div class="form-group">
+          <label>工单号正则</label>
+          <input type="text" id="cfgTicketPattern" placeholder="例如: (\w+-\d+)">
+        </div>
+        <div class="form-group">
+          <label>版本号正则</label>
+          <input type="text" id="cfgVersionPattern" placeholder="例如: ^v?\d+\.\d+\.\d+$">
+        </div>
+        <div class="form-group">
+          <label>版本前缀</label>
+          <input type="text" id="cfgVersionPrefix" placeholder="例如: v">
+        </div>
+        <div class="form-group">
+          <label>忽略模式 (逗号分隔)</label>
+          <input type="text" id="cfgIgnorePatterns" placeholder="例如: ^Merge,^Revert,^WIP">
+        </div>
+        <div class="form-group">
+          <label>功能关键字 (逗号分隔)</label>
+          <input type="text" id="cfgKwFeature" placeholder="例如: feat,feature,add,新增">
+        </div>
+        <div class="form-group">
+          <label>修复关键字 (逗号分隔)</label>
+          <input type="text" id="cfgKwFix" placeholder="例如: fix,bug,patch,修复">
+        </div>
+        <div class="form-group">
+          <label>破坏性变更关键字 (逗号分隔)</label>
+          <input type="text" id="cfgKwBreaking" placeholder="例如: break,breaking,remove,删除">
+        </div>
+        <button onclick="saveConfig()">保存配置</button>
+        <button onclick="resetConfig()" class="danger">恢复默认</button>
+      </div>
+      <div id="configResult" class="result-box hidden"></div>
+    </section>
+  </main>
+
+  <div id="commitModal" class="modal hidden">
+    <div class="modal-content">
+      <span class="modal-close" onclick="closeModal()">&times;</span>
+      <h3 id="modalTitle">提交详情</h3>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

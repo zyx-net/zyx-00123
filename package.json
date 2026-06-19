@@ -1,0 +1,13 @@
+{
+  "name": "release-notes-tool",
+  "version": "1.0.0",
+  "description": "Local release notes organizing tool with rule configuration, commit import, auto-classification, manual review, undo, version archiving and Markdown export",
+  "bin": {
+    "rn": "./bin/cli.js"
+  },
+  "scripts": {
+    "cli": "node bin/cli.js",
+    "web": "node web/server.js"
+  },
+  "dependencies": {}
+}
