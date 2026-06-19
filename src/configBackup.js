@@ -17,6 +17,16 @@ const KNOWN_CONFIG_KEYS = [
 
 const KNOWN_KEYWORD_CATEGORIES = ['feature', 'fix', 'breaking']
 
+const SELECTABLE_FIELDS = [
+  'ticketPattern',
+  'versionPattern',
+  'versionPrefix',
+  'keywords.feature',
+  'keywords.fix',
+  'keywords.breaking',
+  'ignorePatterns'
+]
+
 function generateBackupId() {
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const rand = crypto.randomBytes(4).toString('hex')
@@ -57,6 +67,99 @@ function computeChecksum(configData) {
   }
   const str = canonicalStringify(configData)
   return crypto.createHash('sha256').update(str, 'utf-8').digest('hex')
+}
+
+function getFieldValue(configObj, fieldPath) {
+  const parts = fieldPath.split('.')
+  let val = configObj
+  for (const p of parts) {
+    if (val === null || val === undefined) return undefined
+    val = val[p]
+  }
+  return val
+}
+
+function setFieldValue(configObj, fieldPath, value) {
+  const parts = fieldPath.split('.')
+  let target = configObj
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (target[parts[i]] === undefined) {
+      target[parts[i]] = {}
+    }
+    target = target[parts[i]]
+  }
+  target[parts[parts.length - 1]] = value
+}
+
+function diffArrays(backupArr, currentArr) {
+  const b = backupArr || []
+  const c = currentArr || []
+  const added = []
+  const removed = []
+  const inBackup = new Set(b)
+  const inCurrent = new Set(c)
+  for (const item of b) {
+    if (!inCurrent.has(item)) removed.push(item)
+  }
+  for (const item of c) {
+    if (!inBackup.has(item)) added.push(item)
+  }
+  return { added, removed, identical: added.length === 0 && removed.length === 0 && b.length === c.length }
+}
+
+function computeDetailedDiff(backupConfig, currentConfig) {
+  const diff = []
+  for (const field of SELECTABLE_FIELDS) {
+    const backupVal = getFieldValue(backupConfig, field)
+    const currentVal = getFieldValue(currentConfig, field)
+    const entry = {
+      field,
+      backupValue: JSON.parse(JSON.stringify(backupVal)),
+      currentValue: JSON.parse(JSON.stringify(currentVal))
+    }
+    if (field.startsWith('keywords.') || field === 'ignorePatterns') {
+      const arrDiff = diffArrays(backupVal || [], currentVal || [])
+      entry.isArray = true
+      entry.added = arrDiff.added
+      entry.removed = arrDiff.removed
+      entry.changed = !arrDiff.identical
+    } else {
+      entry.isArray = false
+      entry.changed = backupVal !== currentVal
+    }
+    diff.push(entry)
+  }
+  return {
+    fields: diff,
+    changedFields: diff.filter(d => d.changed).map(d => d.field),
+    hasChanges: diff.some(d => d.changed)
+  }
+}
+
+function detectConflict(newConfig, existingConfig) {
+  const changed = []
+
+  for (const key of ['ticketPattern', 'versionPattern', 'versionPrefix']) {
+    if (newConfig[key] !== existingConfig[key]) {
+      changed.push({ field: key, from: existingConfig[key], to: newConfig[key] })
+    }
+  }
+
+  for (const cat of KNOWN_KEYWORD_CATEGORIES) {
+    const newKw = (newConfig.keywords && newConfig.keywords[cat]) || []
+    const oldKw = (existingConfig.keywords && existingConfig.keywords[cat]) || []
+    if (JSON.stringify(newKw) !== JSON.stringify(oldKw)) {
+      changed.push({ field: `keywords.${cat}`, from: [...oldKw], to: [...newKw] })
+    }
+  }
+
+  const newIg = newConfig.ignorePatterns || []
+  const oldIg = existingConfig.ignorePatterns || []
+  if (JSON.stringify(newIg) !== JSON.stringify(oldIg)) {
+    changed.push({ field: 'ignorePatterns', from: [...oldIg], to: [...newIg] })
+  }
+
+  return { hasConflict: changed.length > 0, changes: changed }
 }
 
 function exportBackup(name) {
@@ -200,30 +303,32 @@ function validateBackupStructure(data) {
   }
 }
 
-function detectConflict(newConfig, existingConfig) {
-  const changed = []
-
-  for (const key of ['ticketPattern', 'versionPattern', 'versionPrefix']) {
-    if (newConfig[key] !== existingConfig[key]) {
-      changed.push({ field: key, from: existingConfig[key], to: newConfig[key] })
-    }
+function diffBackup(backupData) {
+  const currentConfig = configModule.get()
+  const validation = validateBackupStructure(backupData)
+  const detailedDiff = computeDetailedDiff(backupData.config, currentConfig)
+  const conflict = detectConflict(backupData.config, currentConfig)
+  return {
+    valid: validation.valid,
+    validation,
+    detailedDiff,
+    conflict,
+    selectableFields: SELECTABLE_FIELDS
   }
+}
 
-  for (const cat of KNOWN_KEYWORD_CATEGORIES) {
-    const newKw = (newConfig.keywords && newConfig.keywords[cat]) || []
-    const oldKw = (existingConfig.keywords && existingConfig.keywords[cat]) || []
-    if (JSON.stringify(newKw) !== JSON.stringify(oldKw)) {
-      changed.push({ field: `keywords.${cat}`, from: [...oldKw], to: [...newKw] })
-    }
+function diffBackupFromFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return { success: false, errors: [`备份文件不存在: ${filePath}`] }
   }
-
-  const newIg = newConfig.ignorePatterns || []
-  const oldIg = existingConfig.ignorePatterns || []
-  if (JSON.stringify(newIg) !== JSON.stringify(oldIg)) {
-    changed.push({ field: 'ignorePatterns', from: [...oldIg], to: [...newIg] })
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    const data = JSON.parse(raw)
+    const result = diffBackup(data)
+    return { success: true, ...result, sourcePath: filePath }
+  } catch (e) {
+    return { success: false, errors: [`读取/解析备份文件失败: ${e.message}`] }
   }
-
-  return { hasConflict: changed.length > 0, changes: changed }
 }
 
 function isDuplicateBackup(newSnapshot) {
@@ -245,10 +350,32 @@ function findBackupByChecksum(checksum) {
   return null
 }
 
+function writeRestoreLog(entry) {
+  try {
+    store.appendRestoreLog(entry)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+function buildRestoredConfig(backupConfig, selectedFields, existingConfig) {
+  const merged = JSON.parse(JSON.stringify(existingConfig))
+  for (const field of selectedFields) {
+    if (!SELECTABLE_FIELDS.includes(field)) continue
+    const val = getFieldValue(backupConfig, field)
+    if (val !== undefined) {
+      setFieldValue(merged, field, JSON.parse(JSON.stringify(val)))
+    }
+  }
+  return merged
+}
+
 function importBackupFromFile(filePath, options) {
   options = options || {}
   const force = options.force === true
   const dryRun = options.dryRun === true
+  const selectedFields = Array.isArray(options.fields) ? options.fields : null
 
   const logs = []
   const warnings = []
@@ -287,18 +414,46 @@ function importBackupFromFile(filePath, options) {
     return { success: false, errors, warnings, logs }
   }
 
-  const newConfig = JSON.parse(JSON.stringify(data.config))
+  const backupConfig = JSON.parse(JSON.stringify(data.config))
   const existingConfig = configModule.get()
   const existingConfigSnapshot = JSON.parse(JSON.stringify(existingConfig))
 
-  const conflict = detectConflict(newConfig, existingConfig)
-  if (conflict.hasConflict) {
-    logs.push(`检测到 ${conflict.changes.length} 处配置差异`)
-    conflict.changes.forEach(c => {
-      logs.push(`  - ${c.field}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
-    })
+  const detailedDiff = computeDetailedDiff(backupConfig, existingConfig)
+  const isPartial = selectedFields !== null && selectedFields.length > 0
+  const effectiveFields = isPartial
+    ? selectedFields.filter(f => SELECTABLE_FIELDS.includes(f) && detailedDiff.fields.find(d => d.field === f)?.changed)
+    : detailedDiff.changedFields
+
+  if (isPartial) {
+    const invalid = selectedFields.filter(f => !SELECTABLE_FIELDS.includes(f))
+    if (invalid.length > 0) {
+      warnings.push(`忽略未知字段: ${invalid.join(', ')}`)
+    }
+    logs.push(`按项恢复模式，选中 ${selectedFields.length} 个字段，其中 ${effectiveFields.length} 个存在差异将被应用`)
   } else {
-    logs.push('新配置与当前配置完全一致')
+    logs.push(`整包恢复模式，共 ${effectiveFields.length} 个字段存在差异`)
+  }
+
+  for (const f of effectiveFields) {
+    const d = detailedDiff.fields.find(x => x.field === f)
+    if (d && d.isArray) {
+      logs.push(`  - ${f}: 移除 ${JSON.stringify(d.removed)}, 新增 ${JSON.stringify(d.added)}`)
+    } else if (d) {
+      logs.push(`  - ${f}: ${JSON.stringify(d.currentValue)} → ${JSON.stringify(d.backupValue)}`)
+    }
+  }
+
+  if (effectiveFields.length === 0) {
+    logs.push('选中的字段与当前配置无差异，无需恢复')
+  }
+
+  const conflict = detectConflict(backupConfig, existingConfig)
+  if (conflict.hasConflict) {
+    const conflictFields = conflict.changes.map(c => c.field)
+    const conflictingSelected = effectiveFields.filter(f => conflictFields.includes(f))
+    if (conflictingSelected.length > 0) {
+      warnings.push(`检测到 ${conflictingSelected.length} 个冲突字段（当前配置在备份导出后已被修改）: ${conflictingSelected.join(', ')}`)
+    }
   }
 
   const dupById = isDuplicateBackup(data)
@@ -310,41 +465,88 @@ function importBackupFromFile(filePath, options) {
     warnings.push(`已存在相同内容的备份 (${dupByChecksum.filename})`)
   }
 
-  if (!force && (dupById || dupByChecksum) && !conflict.hasConflict) {
-    warnings.push('检测到重复导入且配置无变化，将跳过实际写入（使用 force=true 可强制执行）')
-    return {
-      success: true,
-      skipped: true,
-      reason: 'duplicate_no_change',
-      errors,
-      warnings,
-      logs
-    }
-  }
-
   if (dryRun) {
     logs.push('dry-run 模式，未实际写入配置')
     return {
       success: true,
       dryRun: true,
+      isPartial,
+      selectedFields: effectiveFields,
+      detailedDiff,
       errors,
       warnings,
       logs,
-      wouldApply: conflict.changes
+      wouldApply: conflict.changes.filter(c => effectiveFields.includes(c.field))
     }
   }
+
+  if (effectiveFields.length === 0 && !force) {
+    return {
+      success: true,
+      skipped: true,
+      reason: isPartial ? 'no_changes_in_selected_fields' : ((dupById || dupByChecksum) ? 'duplicate_no_change' : 'no_changes_in_selected_fields'),
+      isPartial,
+      selectedFields: effectiveFields,
+      errors,
+      warnings,
+      logs
+    }
+  }
+  if (effectiveFields.length === 0 && force) {
+    if (isPartial) {
+      logs.push('force=true 但选中字段无差异，按项恢复无操作')
+      return {
+        success: true,
+        skipped: true,
+        reason: 'force_no_changes_partial',
+        isPartial,
+        selectedFields: effectiveFields,
+        errors,
+        warnings,
+        logs
+      }
+    }
+    logs.push('force=true 强制执行整包恢复（虽无差异）')
+    const allFields = SELECTABLE_FIELDS.slice()
+    if (dryRun) {
+      logs.push('dry-run 模式，未实际写入配置')
+      return {
+        success: true,
+        dryRun: true,
+        isPartial: false,
+        selectedFields: allFields,
+        detailedDiff,
+        errors,
+        warnings,
+        logs,
+        wouldApply: []
+      }
+    }
+  }
+
+  const finalFields = effectiveFields.length > 0
+    ? effectiveFields
+    : (isPartial ? [] : SELECTABLE_FIELDS.slice())
+
+  const mergedConfig = isPartial
+    ? buildRestoredConfig(backupConfig, finalFields, existingConfigSnapshot)
+    : JSON.parse(JSON.stringify(backupConfig))
+
+  const appliedChanges = conflict.changes.filter(c => finalFields.includes(c.field))
 
   const previousSnapshot = {
     backupId: data.backupId || ('imported-' + Date.now()),
     name: data.name || '导入的配置',
     restoredAt: new Date().toISOString(),
     previousConfig: existingConfigSnapshot,
-    restoredConfig: JSON.parse(JSON.stringify(newConfig)),
-    sourcePath: path.resolve(filePath)
+    restoredConfig: JSON.parse(JSON.stringify(mergedConfig)),
+    sourcePath: path.resolve(filePath),
+    isPartial,
+    selectedFields: finalFields
   }
 
   try {
-    store.saveConfig(JSON.parse(JSON.stringify(newConfig)))
+    store.saveConfig(JSON.parse(JSON.stringify(mergedConfig)))
     const verifyConfig = store.loadConfig()
     const verifyErrors = configModule.validateConfig(verifyConfig)
     if (verifyErrors.length > 0) {
@@ -368,11 +570,31 @@ function importBackupFromFile(filePath, options) {
     warnings.push(`保存撤销快照失败: ${e.message}（不影响本次恢复结果）`)
   }
 
+  try {
+    writeRestoreLog({
+      timestamp: new Date().toISOString(),
+      action: isPartial ? 'partial_restore' : 'full_restore',
+      backupId: data.backupId,
+      backupName: data.name,
+      sourcePath: path.resolve(filePath),
+      selectedFields: finalFields,
+      changes: appliedChanges,
+      warnings: [...warnings],
+      success: true
+    })
+    logs.push('恢复操作已写入日志')
+  } catch (e) {
+    warnings.push(`写入恢复日志失败: ${e.message}`)
+  }
+
   return {
     success: true,
-    restoredConfig: newConfig,
+    restoredConfig: mergedConfig,
     previousConfig: existingConfigSnapshot,
-    changes: conflict.changes,
+    changes: appliedChanges,
+    isPartial,
+    selectedFields: finalFields,
+    detailedDiff,
     errors,
     warnings,
     logs
@@ -407,6 +629,9 @@ function undoLastRestore() {
 
   logs.push(`准备撤销恢复操作，来源: ${undoSnapshot.sourcePath || undoSnapshot.backupId}`)
   logs.push(`恢复时间: ${undoSnapshot.restoredAt}`)
+  if (undoSnapshot.isPartial) {
+    logs.push(`本次撤销对应按项恢复，涉及字段: ${(undoSnapshot.selectedFields || []).join(', ')}`)
+  }
 
   try {
     store.saveConfig(JSON.parse(JSON.stringify(undoSnapshot.previousConfig)))
@@ -427,6 +652,22 @@ function undoLastRestore() {
   }
 
   try {
+    writeRestoreLog({
+      timestamp: new Date().toISOString(),
+      action: 'undo_restore',
+      backupId: undoSnapshot.backupId,
+      backupName: undoSnapshot.name,
+      sourcePath: undoSnapshot.sourcePath,
+      isPartial: undoSnapshot.isPartial,
+      selectedFields: undoSnapshot.selectedFields || [],
+      success: true
+    })
+    logs.push('撤销操作已写入日志')
+  } catch (e) {
+    warnings.push(`写入撤销日志失败: ${e.message}`)
+  }
+
+  try {
     store.clearConfigRestoreUndo()
     logs.push('已清除撤销快照')
   } catch (e) {
@@ -439,6 +680,8 @@ function undoLastRestore() {
     previousBeforeUndo: currentConfigSnapshot,
     sourceBackup: undoSnapshot.backupId,
     sourceName: undoSnapshot.name,
+    isPartial: undoSnapshot.isPartial,
+    selectedFields: undoSnapshot.selectedFields,
     errors,
     warnings,
     logs
@@ -454,8 +697,16 @@ function peekRestoreUndo() {
     restoredAt: snap.restoredAt,
     sourcePath: snap.sourcePath,
     previousConfig: snap.previousConfig,
-    restoredConfig: snap.restoredConfig
+    restoredConfig: snap.restoredConfig,
+    isPartial: snap.isPartial,
+    selectedFields: snap.selectedFields
   }
+}
+
+function listRestoreLogs(limit) {
+  const logs = store.loadRestoreLogs()
+  const n = typeof limit === 'number' ? Math.min(limit, logs.length) : logs.length
+  return logs.slice(logs.length - n).reverse()
 }
 
 function listBackups() {
@@ -477,12 +728,21 @@ module.exports = {
   peekRestoreUndo,
   listBackups,
   deleteBackup,
+  computeDetailedDiff,
+  diffBackup,
+  diffBackupFromFile,
+  listRestoreLogs,
+  SELECTABLE_FIELDS,
   BACKUP_SCHEMA_VERSION,
   KNOWN_CONFIG_KEYS,
   KNOWN_KEYWORD_CATEGORIES,
   _testExports: {
     computeChecksum,
     detectConflict,
-    buildBackupSnapshot
+    buildBackupSnapshot,
+    diffArrays,
+    getFieldValue,
+    setFieldValue,
+    buildRestoredConfig
   }
 }

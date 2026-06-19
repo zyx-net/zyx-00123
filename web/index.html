@@ -198,8 +198,23 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
           <label><input type="checkbox" id="cfgRestoreDryRun"> 仅预览差异，不实际写入</label>
         </div>
         <button onclick="validateRestoreInput()" class="secondary">校验格式</button>
+        <button onclick="previewRestoreDiff()" class="secondary">查看差异并选择字段</button>
         <button onclick="importConfigBackup()">导入恢复</button>
+        <div id="restoreDiffPanel" class="hidden" style="margin-top:16px;border:1px solid #ddd;padding:12px;border-radius:4px">
+          <h4 style="margin-top:0">逐项差异 (勾选要恢复的字段)</h4>
+          <div id="restoreDiffList"></div>
+          <div style="margin-top:8px">
+            <button onclick="confirmPartialRestore()" style="background:#27ae60">恢复选中字段</button>
+            <button onclick="cancelPartialRestore()" class="secondary">取消</button>
+          </div>
+        </div>
         <div id="restoreResult" class="result-box hidden"></div>
+      </div>
+
+      <div class="card">
+        <h3>恢复操作日志</h3>
+        <button onclick="loadRestoreLogs()" class="secondary">刷新日志</button>
+        <div id="restoreLogsList" style="margin-top:12px"></div>
       </div>
 
       <div class="card">

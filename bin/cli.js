@@ -60,9 +60,14 @@ function printHelp() {
     config backup [name]                 导出当前配置为备份文件 (可选自定义名称)
     config backup-list                   列出所有配置备份
     config backup-delete <filename>      删除指定备份文件
+    config diff <filename|path>          查看备份与当前配置的逐项差异
     config restore <filename|path>       从备份文件恢复配置
+      可选: --fields f1,f2,...         仅恢复指定字段 (按项恢复)
+      可选: --force                     强制恢复 (即使内容重复)
+      可选: --dry-run                   仅预览，不实际写入
     config restore-peek                  查看最近一次恢复的撤销信息
     config undo-restore                  撤销最近一次配置恢复
+    config restore-logs [n]              查看最近 n 条恢复日志 (默认 10)
     config validate-file <path>          校验备份文件格式
 
   导入提交:
@@ -175,24 +180,93 @@ function run() {
         } else {
           err(`删除失败: 备份不存在`)
         }
+      } else if (sub === 'diff') {
+        const target = args[2]
+        if (!target) { err('用法: config diff <filename|path>'); break }
+        try {
+          const fs = require('fs')
+          const pathMod = require('path')
+          let diffResult
+          let filePath = null
+          if (target.includes('/') || target.includes('\\')) {
+            filePath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            if (!fs.existsSync(filePath)) filePath = null
+          }
+          if (!filePath) {
+            const resolved = require('../src/store').readBackupFile(target)
+            if (resolved) filePath = resolved.path
+          }
+          if (!filePath) {
+            err(`备份不存在: ${target}`)
+            break
+          }
+          diffResult = configBackup.diffBackupFromFile(filePath)
+          if (!diffResult.success) {
+            diffResult.errors.forEach(e => err(`  ✗ ${e}`))
+            break
+          }
+          diffResult.validation.info.forEach(i => out(`  ℹ ${i}`))
+          diffResult.validation.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+          diffResult.validation.errors.forEach(e => err(`  ✗ ${e}`))
+          if (!diffResult.valid) {
+            err('备份文件结构不合法')
+            break
+          }
+          const dd = diffResult.detailedDiff
+          if (!dd.hasChanges) {
+            ok('备份内容与当前配置完全一致，无差异')
+            break
+          }
+          out(`\n共 ${dd.changedFields.length} 个字段存在差异:\n`)
+          dd.fields.forEach((d, idx) => {
+            if (!d.changed) {
+              out(`  ${idx + 1}. [一致] ${d.field}`)
+            } else {
+              yellow(`  ${idx + 1}. [差异] ${d.field}`)
+              if (d.isArray) {
+                if (d.removed.length > 0) out(`       ← 备份中存在 (将恢复): ${d.removed.join(', ')}`)
+                if (d.added.length > 0) out(`       → 当前新增 (将被移除): ${d.added.join(', ')}`)
+              } else {
+                out(`       ← 备份值: ${JSON.stringify(d.backupValue)}`)
+                out(`       → 当前值: ${JSON.stringify(d.currentValue)}`)
+              }
+            }
+          })
+          if (diffResult.conflict.hasConflict) {
+            yellow(`\n⚠ 冲突提示: 当前配置在备份导出后已被修改，共 ${diffResult.conflict.changes.length} 处变更`)
+          }
+          out(`\n可恢复字段列表: ${configBackup.SELECTABLE_FIELDS.join(', ')}`)
+          out('使用: rn config restore <file> --fields keywords.feature,ignorePatterns 进行按项恢复')
+        } catch (e) {
+          err(`差异对比失败: ${e.message}`)
+        }
       } else if (sub === 'restore') {
         const target = args[2]
-        if (!target) { err('用法: config restore <filename|path>'); break }
+        if (!target) { err('用法: config restore <filename|path> [--fields f1,f2,...] [--force] [--dry-run]'); break }
         const forceIdx = args.indexOf('--force')
         const force = forceIdx >= 0
+        const dryRunIdx = args.indexOf('--dry-run')
+        const dryRun = dryRunIdx >= 0
+        const fieldsIdx = args.indexOf('--fields')
+        let fields = null
+        if (fieldsIdx >= 0 && args[fieldsIdx + 1]) {
+          fields = args[fieldsIdx + 1].split(',').map(s => s.trim()).filter(Boolean)
+        }
         try {
           const fs = require('fs')
           const pathMod = require('path')
           let result
+          const opts = { force, dryRun }
+          if (fields) opts.fields = fields
           if (target.includes('/') || target.includes('\\') || target.endsWith('.json')) {
             const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
             if (fs.existsSync(absPath)) {
-              result = configBackup.importBackupFromFile(absPath, { force })
+              result = configBackup.importBackupFromFile(absPath, opts)
             } else {
-              result = configBackup.importBackup(target, { force })
+              result = configBackup.importBackup(target, opts)
             }
           } else {
-            result = configBackup.importBackup(target, { force })
+            result = configBackup.importBackup(target, opts)
           }
           result.logs.forEach(l => out(`  ℹ ${l}`))
           result.warnings.forEach(w => yellow(`  ⚠ ${w}`))
@@ -200,8 +274,19 @@ function run() {
           if (result.success) {
             if (result.skipped) {
               yellow(`恢复已跳过 (${result.reason})`)
+            } else if (result.dryRun) {
+              yellow('预览模式 (dry-run)，未实际写入')
+              if (result.wouldApply && result.wouldApply.length > 0) {
+                out(`\n  将应用 ${result.wouldApply.length} 处变更:`)
+                result.wouldApply.forEach(c => {
+                  out(`    - ${c.field}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
+                })
+              }
             } else {
-              ok('配置恢复成功')
+              ok(result.isPartial ? '按项恢复成功' : '配置恢复成功')
+              if (result.selectedFields && result.selectedFields.length > 0) {
+                out(`  已应用字段: ${result.selectedFields.join(', ')}`)
+              }
               if (result.changes && result.changes.length > 0) {
                 out(`  共 ${result.changes.length} 处变更:`)
                 result.changes.forEach(c => {
@@ -215,6 +300,26 @@ function run() {
           }
         } catch (e) {
           err(`恢复失败: ${e.message}`)
+        }
+      } else if (sub === 'restore-logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 10
+        try {
+          const logs = configBackup.listRestoreLogs(isNaN(n) ? 10 : n)
+          if (logs.length === 0) {
+            yellow('暂无恢复操作日志')
+          } else {
+            out(`最近 ${logs.length} 条恢复操作日志:`)
+            logs.forEach((l, i) => {
+              const actionLabel = l.action === 'full_restore' ? '整包恢复' : (l.action === 'partial_restore' ? '按项恢复' : '撤销恢复')
+              out(`  ${i + 1}. [${actionLabel}] ${l.timestamp}`)
+              out(`     来源: ${l.backupName || l.backupId}`)
+              if (l.selectedFields && l.selectedFields.length > 0) out(`     字段: ${l.selectedFields.join(', ')}`)
+              if (l.changes && l.changes.length > 0) out(`     变更数: ${l.changes.length}`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
         }
       } else if (sub === 'restore-peek') {
         const snap = configBackup.peekRestoreUndo()
@@ -258,7 +363,7 @@ function run() {
           err(`校验失败: ${e.message}`)
         }
       } else {
-        err('未知 config 子命令。使用: show | set | keywords | ignore | reset | backup | backup-list | backup-delete | restore | restore-peek | undo-restore | validate-file')
+        err('未知 config 子命令。使用: show | set | keywords | ignore | reset | backup | backup-list | backup-delete | diff | restore | restore-peek | undo-restore | restore-logs | validate-file')
       }
       break
     }

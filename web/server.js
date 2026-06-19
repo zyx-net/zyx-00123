@@ -85,16 +85,20 @@ async function handleApi(req, res, pathname) {
     const body = await parseBody(req)
     try {
       let result
+      const opts = { force: body.force, dryRun: body.dryRun }
+      if (Array.isArray(body.fields) && body.fields.length > 0) {
+        opts.fields = body.fields
+      }
       if (body.path) {
-        result = configBackup.importBackupFromFile(body.path, { force: body.force, dryRun: body.dryRun })
+        result = configBackup.importBackupFromFile(body.path, opts)
       } else if (body.filename) {
-        result = configBackup.importBackup(body.filename, { force: body.force, dryRun: body.dryRun })
+        result = configBackup.importBackup(body.filename, opts)
       } else if (body.backupData) {
         const fs = require('fs')
         const os = require('os')
         const tmpFile = path.join(os.tmpdir(), `config-upload-${Date.now()}.json`)
         fs.writeFileSync(tmpFile, JSON.stringify(body.backupData), 'utf-8')
-        result = configBackup.importBackupFromFile(tmpFile, { force: body.force, dryRun: body.dryRun })
+        result = configBackup.importBackupFromFile(tmpFile, opts)
         try { fs.unlinkSync(tmpFile) } catch {}
       } else {
         return sendError(res, '缺少 path, filename 或 backupData 参数')
@@ -103,6 +107,37 @@ async function handleApi(req, res, pathname) {
         return sendError(res, result.errors.join('; '), 400)
       }
       return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/config/diff' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      if (body.path) {
+        result = configBackup.diffBackupFromFile(body.path)
+      } else if (body.filename) {
+        const resolved = store.readBackupFile(body.filename)
+        if (!resolved) return sendError(res, `备份不存在: ${body.filename}`, 404)
+        result = configBackup.diffBackupFromFile(resolved.path)
+      } else if (body.backupData) {
+        result = { success: true, ...configBackup.diffBackup(body.backupData) }
+      } else {
+        return sendError(res, '缺少 path, filename 或 backupData 参数')
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/config/restore/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '10', 10)
+    try {
+      const logs = configBackup.listRestoreLogs(isNaN(n) ? 10 : n)
+      return sendJson(res, { logs })
     } catch (e) {
       return sendError(res, e.message)
     }

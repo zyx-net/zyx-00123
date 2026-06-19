@@ -56,6 +56,7 @@ document.querySelectorAll('.tab').forEach(btn => {
       loadConfig()
       loadBackups()
       peekRestoreUndo()
+      loadRestoreLogs()
     }
   })
 })
@@ -519,6 +520,7 @@ async function loadBackups() {
           <div class="archive-meta">${b.created} | ${b.size}B</div>
         </div>
         <div>
+          <button onclick="previewDiffFromBackup('${escHtml(b.filename)}')" class="secondary">查看差异</button>
           <button onclick="restoreFromBackup('${escHtml(b.filename)}')" class="secondary">恢复此备份</button>
           <button onclick="deleteBackup('${escHtml(b.filename)}')" class="danger">删除</button>
         </div>
@@ -625,16 +627,171 @@ function displayRestoreResult(result) {
       }
       showResult('restoreResult', msg, 'warning')
     } else {
-      msg += '\n✓ 配置恢复成功'
+      msg += result.isPartial ? '\n✓ 按项恢复成功' : '\n✓ 配置恢复成功'
+      if (result.selectedFields && result.selectedFields.length > 0) {
+        msg += '\n已应用字段: ' + result.selectedFields.join(', ')
+      }
       if (result.changes && result.changes.length > 0) {
         msg += '\n\n已应用 ' + result.changes.length + ' 处变更'
       }
       showResult('restoreResult', msg, 'success')
       loadConfig()
       peekRestoreUndo()
+      loadRestoreLogs()
     }
   } else {
     showResult('restoreResult', msg || '恢复失败', 'error')
+  }
+}
+
+let currentDiffBackupData = null
+
+async function previewRestoreDiff() {
+  try {
+    const backupData = await getRestoreInput()
+    if (!backupData) {
+      showResult('restoreResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    const result = await api('/api/config/diff', 'POST', { backupData })
+    if (!result.success) {
+      showResult('restoreResult', '差异对比失败: ' + (result.errors || []).join('; '), 'error')
+      return
+    }
+    if (result.validation) {
+      result.validation.info.forEach(i => console.log('[INFO]', i))
+      result.validation.warnings.forEach(w => console.warn('[WARN]', w))
+      result.validation.errors.forEach(e => console.error('[ERR]', e))
+    }
+    if (!result.valid) {
+      showResult('restoreResult', '备份文件结构不合法', 'error')
+      return
+    }
+    currentDiffBackupData = backupData
+    renderDiffPanel(result)
+  } catch (e) {
+    showResult('restoreResult', '差异对比失败: ' + e.message, 'error')
+  }
+}
+
+async function previewDiffFromBackup(filename) {
+  try {
+    const result = await api('/api/config/diff', 'POST', { filename })
+    if (!result.success) {
+      showResult('configResult', '差异对比失败: ' + (result.errors || []).join('; '), 'error')
+      return
+    }
+    if (!result.valid) {
+      showResult('configResult', '备份文件结构不合法', 'error')
+      return
+    }
+    const resolved = await api('/api/config/backups', 'GET')
+    const found = resolved.find(b => b.filename === filename)
+    currentDiffBackupData = null
+    if (found) {
+      window._pendingRestoreFilename = filename
+    }
+    renderDiffPanel(result)
+  } catch (e) {
+    showResult('configResult', '差异对比失败: ' + e.message, 'error')
+  }
+}
+
+function renderDiffPanel(diffResult) {
+  const panel = document.getElementById('restoreDiffPanel')
+  const listEl = document.getElementById('restoreDiffList')
+  const dd = diffResult.detailedDiff
+  if (!dd.hasChanges) {
+    listEl.innerHTML = '<p style="color:#27ae60">备份内容与当前配置完全一致，无差异</p>'
+  } else {
+    let html = ''
+    if (diffResult.conflict && diffResult.conflict.hasConflict) {
+      html += `<div style="background:#fff3cd;color:#856404;padding:8px;border-radius:4px;margin-bottom:12px">⚠ 冲突提示: 当前配置在备份导出后已被修改，共 ${diffResult.conflict.changes.length} 处变更</div>`
+    }
+    dd.fields.forEach((d, idx) => {
+      const rowCls = d.changed ? 'diff-row changed' : 'diff-row unchanged'
+      let detail = ''
+      if (d.changed) {
+        if (d.isArray) {
+          const removedHtml = d.removed.length > 0 ? `<div class="diff-removed">备份中存在 (将恢复): ${d.removed.map(escHtml).join(', ')}</div>` : ''
+          const addedHtml = d.added.length > 0 ? `<div class="diff-added">当前新增 (将被移除): ${d.added.map(escHtml).join(', ')}</div>` : ''
+          detail = removedHtml + addedHtml
+        } else {
+          detail = `<div class="diff-backup">备份值: ${escHtml(JSON.stringify(d.backupValue))}</div>
+                    <div class="diff-current">当前值: ${escHtml(JSON.stringify(d.currentValue))}</div>`
+        }
+      }
+      html += `<div class="${rowCls}">
+        <label>
+          <input type="checkbox" class="diff-field-cb" value="${d.field}" ${d.changed ? 'checked' : ''} ${!d.changed ? 'disabled' : ''}>
+          <strong>${d.field}</strong> ${d.changed ? '<span class="diff-badge">[差异]</span>' : '<span class="diff-badge ok">[一致]</span>'}
+        </label>
+        ${detail ? `<div class="diff-detail">${detail}</div>` : ''}
+      </div>`
+    })
+    listEl.innerHTML = html
+  }
+  panel.classList.remove('hidden')
+}
+
+function cancelPartialRestore() {
+  currentDiffBackupData = null
+  window._pendingRestoreFilename = null
+  document.getElementById('restoreDiffPanel').classList.add('hidden')
+}
+
+async function confirmPartialRestore() {
+  const cbs = document.querySelectorAll('.diff-field-cb:checked')
+  const fields = Array.from(cbs).map(cb => cb.value)
+  if (fields.length === 0) {
+    alert('请至少选择一个要恢复的字段')
+    return
+  }
+  if (!confirm(`确定恢复选中的 ${fields.length} 个字段？\n字段: ${fields.join(', ')}`)) return
+  try {
+    const force = document.getElementById('cfgRestoreForce').checked
+    const dryRun = document.getElementById('cfgRestoreDryRun').checked
+    let result
+    if (window._pendingRestoreFilename) {
+      result = await api('/api/config/restore', 'POST', { filename: window._pendingRestoreFilename, force, dryRun, fields })
+    } else if (currentDiffBackupData) {
+      result = await api('/api/config/restore', 'POST', { backupData: currentDiffBackupData, force, dryRun, fields })
+    } else {
+      showResult('restoreResult', '缺少备份数据', 'error')
+      return
+    }
+    cancelPartialRestore()
+    displayRestoreResult(result)
+  } catch (e) {
+    showResult('restoreResult', '按项恢复失败: ' + e.message, 'error')
+  }
+}
+
+async function loadRestoreLogs() {
+  try {
+    const result = await api('/api/config/restore/logs?limit=20', 'GET')
+    const el = document.getElementById('restoreLogsList')
+    const logs = result.logs || []
+    if (logs.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无恢复操作日志</p>'
+      return
+    }
+    const labels = { full_restore: '整包恢复', partial_restore: '按项恢复', undo_restore: '撤销恢复' }
+    el.innerHTML = logs.map(l => {
+      const lbl = labels[l.action] || l.action
+      const fieldsHtml = l.selectedFields && l.selectedFields.length > 0
+        ? `<div class="archive-meta">字段: ${escHtml(l.selectedFields.join(', '))}</div>`
+        : ''
+      return `<div class="archive-item">
+        <div>
+          <div class="archive-info">[${lbl}] ${escHtml(l.backupName || l.backupId || '')}</div>
+          <div class="archive-meta">${escHtml(l.timestamp)}${l.changes && l.changes.length ? ' | ' + l.changes.length + ' 处变更' : ''}</div>
+          ${fieldsHtml}
+        </div>
+      </div>`
+    }).join('')
+  } catch (e) {
+    document.getElementById('restoreLogsList').innerHTML = '<p style="color:#e74c3c">加载日志失败: ' + escHtml(e.message) + '</p>'
   }
 }
 
@@ -670,6 +827,7 @@ async function undoLastRestore() {
       showResult('configResult', msg, 'success')
       loadConfig()
       peekRestoreUndo()
+      loadRestoreLogs()
     } else {
       showResult('configResult', msg || result.reason || '撤销失败', 'error')
     }

@@ -150,6 +150,31 @@ function clearConfigRestoreUndo() {
   }
 }
 
+function loadRestoreLogs() {
+  return load('restore_logs') || []
+}
+
+function saveRestoreLogs(logs) {
+  save('restore_logs', logs)
+}
+
+function appendRestoreLog(entry) {
+  const logs = loadRestoreLogs()
+  logs.push(entry)
+  if (logs.length > 100) {
+    logs.splice(0, logs.length - 100)
+  }
+  saveRestoreLogs(logs)
+  return logs
+}
+
+function clearRestoreLogs() {
+  const fp = filePath('restore_logs')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -166,6 +191,10 @@ module.exports = {
   loadConfigRestoreUndo,
   saveConfigRestoreUndo,
   clearConfigRestoreUndo,
+  loadRestoreLogs,
+  saveRestoreLogs,
+  appendRestoreLog,
+  clearRestoreLogs,
   DATA_DIR,
   BACKUPS_DIR
 }
