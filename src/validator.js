@@ -1,5 +1,6 @@
 const store = require('./store')
 const config = require('./config')
+const undo = require('./undo')
 
 function validate() {
   const commits = store.loadCommits()
@@ -83,13 +84,14 @@ function checkArchiveReadiness(version) {
 }
 
 function resolveIssue(commitId, issueIndex) {
+  undo.push('resolve', `解决 ${commitId.substring(0, 8)} 的问题#${issueIndex}`)
   const commits = store.loadCommits()
   const c = commits.find(x => x.id === commitId)
   if (!c) throw new Error(`提交不存在: ${commitId}`)
   if (issueIndex >= 0 && issueIndex < c.issues.length) {
     c.issues.splice(issueIndex, 1)
   }
-  if (c.issues.length === 0) {
+  if ((c.issues || []).length === 0) {
     c.resolved = true
   }
   store.saveCommits(commits)

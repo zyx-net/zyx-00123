@@ -2,6 +2,7 @@ const { execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
 const store = require('./store')
+const undo = require('./undo')
 
 function parseGitLog(gitDir) {
   const cwd = gitDir || '.'
@@ -75,25 +76,33 @@ function parseCsv(filePath) {
 
 function importFromGit(gitDir) {
   const commits = parseGitLog(gitDir)
+  undo.push('import', `从 git 导入 (${gitDir || '.'})`)
   return mergeCommits(commits)
 }
 
 function importFromCsv(filePath) {
   const commits = parseCsv(filePath)
+  undo.push('import', `从 CSV 导入 (${filePath})`)
   return mergeCommits(commits)
 }
 
 function mergeCommits(newCommits) {
   const existing = store.loadCommits()
   const existingIds = new Set(existing.map(c => c.id))
+  const batchSeen = new Set()
   const duplicates = []
   const added = []
   newCommits.forEach(c => {
     if (existingIds.has(c.id)) {
       duplicates.push(c)
-    } else {
-      added.push(c)
+      return
     }
+    if (batchSeen.has(c.id)) {
+      duplicates.push(c)
+      return
+    }
+    batchSeen.add(c.id)
+    added.push(c)
   })
   const merged = existing.concat(added)
   store.saveCommits(merged)

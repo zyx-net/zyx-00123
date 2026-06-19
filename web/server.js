@@ -70,7 +70,6 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/import/git' && method === 'POST') {
     const body = await parseBody(req)
     try {
-      undo.push('import', `Web导入git (${body.dir || '.'})`)
       const result = importer.importFromGit(body.dir || '.')
       return sendJson(res, result)
     } catch (e) {
@@ -81,7 +80,6 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/import/csv' && method === 'POST') {
     const body = await parseBody(req)
     try {
-      undo.push('import', `Web导入CSV (${body.file})`)
       const result = importer.importFromCsv(body.file)
       return sendJson(res, result)
     } catch (e) {
@@ -90,7 +88,6 @@ async function handleApi(req, res, pathname) {
   }
 
   if (url.pathname === '/api/classify' && method === 'POST') {
-    undo.push('classify', 'Web自动分类')
     const result = classifier.classify()
     return sendJson(res, result)
   }

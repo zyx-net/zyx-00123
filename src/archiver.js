@@ -1,12 +1,15 @@
 const store = require('./store')
 const config = require('./config')
 const validator = require('./validator')
+const undo = require('./undo')
 
 function archive(version) {
   const check = validator.checkArchiveReadiness(version)
   if (!check.ready) {
     throw new Error(check.reason)
   }
+
+  undo.push('archive', `归档版本 ${version}`)
 
   const commits = store.loadCommits()
   const cfg = config.get()

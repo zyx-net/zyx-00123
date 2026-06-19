@@ -146,7 +146,6 @@ function run() {
       const source = args[1]
       if (source === 'git') {
         const gitDir = args[2] || '.'
-        undo.push('import', `从 git 导入 (${gitDir})`)
         const result = importer.importFromGit(gitDir)
         ok(`导入完成: 新增 ${result.added} 条, 重复 ${result.duplicates} 条, 共 ${result.total} 条`)
         if (result.duplicates > 0) {
@@ -155,7 +154,6 @@ function run() {
       } else if (source === 'csv') {
         const file = args[2]
         if (!file) { err('用法: import csv <file>'); break }
-        undo.push('import', `从 CSV 导入 (${file})`)
         const result = importer.importFromCsv(file)
         ok(`导入完成: 新增 ${result.added} 条, 重复 ${result.duplicates} 条, 共 ${result.total} 条`)
         if (result.duplicates > 0) {
@@ -168,7 +166,6 @@ function run() {
     }
 
     case 'classify': {
-      undo.push('classify', '自动分类')
       const result = classifier.classify()
       ok(`分类完成: 功能=${result.feature} 修复=${result.fix} 破坏性=${result.breaking} 其他=${result.other} 忽略=${result.ignored}`)
       break
