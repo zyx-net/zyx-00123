@@ -11,6 +11,7 @@ const archiver = require('../src/archiver')
 const exporter = require('../src/exporter')
 const store = require('../src/store')
 const configBackup = require('../src/configBackup')
+const exportProfile = require('../src/exportProfile')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -99,7 +100,38 @@ function printHelp() {
     archive <version>                    归档版本 (仅允许全部复核且无未解决问题)
     archives                             列出已归档版本
     export <version> [outputDir]         导出版本发布说明为 Markdown
+      可选: --profile <name|id>         使用指定方案导出
+      可选: --profile-id <id>           按方案ID导出
+      可选: --profile-name <name>       按方案名导出
     export-all [outputDir]               导出所有已归档版本
+      可选: --profile <name|id>         使用指定方案导出
+      可选: --profile-id <id>           按方案ID导出
+      可选: --profile-name <name>       按方案名导出
+
+  导出方案管理:
+    profile list                         列出所有导出方案
+    profile show <name|id>              查看方案详情
+    profile create <name> [options]     创建导出方案
+      选项:
+        --title-template <tpl>         标题模板 (支持 \${version} 占位)
+        --group-order <cats>           分组顺序 (逗号分隔: breaking,feature,fix,other)
+        --include-ticket <0|1>         是否带工单号
+        --include-author <0|1>         是否带作者
+        --include-date <0|1>           是否带日期
+        --output-dir <dir>             输出目录
+        --force                        同名时覆盖
+    profile update <name|id> [options]  更新方案
+      选项同 create，另加 --name <newName> 可重命名
+    profile delete <name|id>            删除方案
+    profile default <name|id>           设为默认方案
+    profile duplicate <name|id> [newName]  复制方案
+    profile export <name|id> [outputPath]  导出方案为 JSON
+    profile import <file|json> [options]  导入方案 JSON
+      可选: --name <customName>        导入时重命名
+      可选: --force                     同名时覆盖
+    profile logs [n]                     查看最近 n 条方案操作日志 (默认 10)
+    profile undo                         撤销最近一次方案变更
+    profile undo-peek                    查看可撤销的方案操作
 
   其他:
     web [port]                           启动 Web 界面 (默认 3000)
@@ -552,10 +584,23 @@ function run() {
     case 'export': {
       const version = args[1]
       const outputDir = args[2]
-      if (!version) { err('用法: export <version> [outputDir]'); break }
+      if (!version) { err('用法: export <version> [outputDir] [--profile name|id] [--profile-id id] [--profile-name name]'); break }
       try {
-        const fp = exporter.exportToFile(version, outputDir)
-        ok(`已导出: ${fp}`)
+        const opts = {}
+        const pIdx = args.indexOf('--profile')
+        const piIdx = args.indexOf('--profile-id')
+        const pnIdx = args.indexOf('--profile-name')
+        if (pIdx >= 0 && args[pIdx + 1]) {
+          const p = args[pIdx + 1]
+          const byId = exportProfile.getProfile(p)
+          if (byId) opts.profileId = p
+          else opts.profileName = p
+        }
+        if (piIdx >= 0 && args[piIdx + 1]) opts.profileId = args[piIdx + 1]
+        if (pnIdx >= 0 && args[pnIdx + 1]) opts.profileName = args[pnIdx + 1]
+        const r = exporter.exportToFile(version, outputDir, opts)
+        ok(`已导出: ${r.path}`)
+        out(`  使用方案: ${r.profileName} (${r.profileId})`)
       } catch (e) {
         err(`导出失败: ${e.message}`)
       }
@@ -565,15 +610,318 @@ function run() {
     case 'export-all': {
       const outputDir = args[1]
       try {
-        const files = exporter.exportAll(outputDir)
+        const opts = {}
+        const pIdx = args.indexOf('--profile')
+        const piIdx = args.indexOf('--profile-id')
+        const pnIdx = args.indexOf('--profile-name')
+        if (pIdx >= 0 && args[pIdx + 1]) {
+          const p = args[pIdx + 1]
+          const byId = exportProfile.getProfile(p)
+          if (byId) opts.profileId = p
+          else opts.profileName = p
+        }
+        if (piIdx >= 0 && args[piIdx + 1]) opts.profileId = args[piIdx + 1]
+        if (pnIdx >= 0 && args[pnIdx + 1]) opts.profileName = args[pnIdx + 1]
+        const files = exporter.exportAll(outputDir, opts)
         if (files.length === 0) {
           yellow('没有可导出的已归档版本')
         } else {
           ok(`已导出 ${files.length} 个文件:`)
-          files.forEach(f => out(`  ${f}`))
+          files.forEach(f => {
+            out(`  ${f.path}`)
+            out(`    方案: ${f.profileName} (${f.profileId})`)
+          })
         }
       } catch (e) {
         err(`导出失败: ${e.message}`)
+      }
+      break
+    }
+
+    case 'profile': {
+      const sub = args[1]
+      if (!sub) { err('用法: profile list|show|create|update|delete|default|duplicate|export|import|logs|undo|undo-peek'); break }
+
+      function resolveProfileIdentifier(arg) {
+        const byId = exportProfile.getProfile(arg)
+        if (byId) return { id: byId.id, profile: byId }
+        const byName = exportProfile.getProfileByName(arg)
+        if (byName) return { id: byName.id, profile: byName }
+        return null
+      }
+
+      function printResultLogs(result) {
+        if (result && result.logs) result.logs.forEach(l => out(`  ℹ ${l}`))
+        if (result && result.warnings) result.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+        if (result && result.errors) result.errors.forEach(e => err(`  ✗ ${e}`))
+      }
+
+      function buildProfileFromArgs(argsArr) {
+        const p = {}
+        const ttIdx = argsArr.indexOf('--title-template')
+        const goIdx = argsArr.indexOf('--group-order')
+        const itIdx = argsArr.indexOf('--include-ticket')
+        const iaIdx = argsArr.indexOf('--include-author')
+        const idIdx = argsArr.indexOf('--include-date')
+        const odIdx = argsArr.indexOf('--output-dir')
+        const nmIdx = argsArr.indexOf('--name')
+        if (ttIdx >= 0 && argsArr[ttIdx + 1]) p.titleTemplate = argsArr[ttIdx + 1]
+        if (goIdx >= 0 && argsArr[goIdx + 1]) {
+          p.groupOrder = argsArr[goIdx + 1].split(',').map(s => s.trim()).filter(Boolean)
+        }
+        if (itIdx >= 0 && argsArr[itIdx + 1]) p.includeTicket = argsArr[itIdx + 1] === '1' || argsArr[itIdx + 1] === 'true'
+        if (iaIdx >= 0 && argsArr[iaIdx + 1]) p.includeAuthor = argsArr[iaIdx + 1] === '1' || argsArr[iaIdx + 1] === 'true'
+        if (idIdx >= 0 && argsArr[idIdx + 1]) p.includeDate = argsArr[idIdx + 1] === '1' || argsArr[idIdx + 1] === 'true'
+        if (odIdx >= 0 && argsArr[odIdx + 1] !== undefined) p.outputDir = argsArr[odIdx + 1]
+        if (nmIdx >= 0 && argsArr[nmIdx + 1]) p.name = argsArr[nmIdx + 1]
+        return p
+      }
+
+      if (sub === 'list') {
+        const list = exportProfile.listProfiles()
+        if (list.length === 0) {
+          yellow('暂无导出方案')
+        } else {
+          out(`共有 ${list.length} 个导出方案:`)
+          list.forEach((p, i) => {
+            const defMark = p.isDefault ? ' [默认]' : ''
+            out(`  ${i + 1}. ${p.name}${defMark}`)
+            out(`     ID: ${p.id}`)
+            out(`     标题模板: ${p.titleTemplate}`)
+            out(`     分组顺序: ${p.groupOrder.join(', ')}`)
+            out(`     选项: 工单=${p.includeTicket ? '✓' : '✗'} 作者=${p.includeAuthor ? '✓' : '✗'} 日期=${p.includeDate ? '✓' : '✗'}`)
+            out(`     输出目录: ${p.outputDir || '(默认)'}`)
+            out(`     创建: ${p.createdAt} | 更新: ${p.updatedAt}`)
+          })
+        }
+      } else if (sub === 'show') {
+        const ident = args[2]
+        if (!ident) { err('用法: profile show <name|id>'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        const p = resolved.profile
+        const defMark = p.isDefault ? ' [默认]' : ''
+        out(`方案: ${p.name}${defMark}`)
+        out(`  ID: ${p.id}`)
+        out(`  标题模板: ${p.titleTemplate}`)
+        out(`  分组顺序: ${p.groupOrder.join(', ')}`)
+        out(`  包含工单号: ${p.includeTicket ? '是' : '否'}`)
+        out(`  包含作者: ${p.includeAuthor ? '是' : '否'}`)
+        out(`  包含日期: ${p.includeDate ? '是' : '否'}`)
+        out(`  输出目录: ${p.outputDir || '(默认)'}`)
+        out(`  创建时间: ${p.createdAt}`)
+        out(`  更新时间: ${p.updatedAt}`)
+      } else if (sub === 'create') {
+        const name = args[2]
+        if (!name) { err('用法: profile create <name> [options]'); break }
+        try {
+          const input = buildProfileFromArgs(args)
+          input.name = name
+          const force = args.indexOf('--force') >= 0
+          const result = exportProfile.createProfile(input, { force })
+          printResultLogs(result)
+          if (result.success) {
+            if (result.overwritten) {
+              yellow(`已覆盖同名方案: ${result.profile.name} (${result.profile.id})`)
+            } else {
+              ok(`已创建方案: ${result.profile.name} (${result.profile.id})`)
+            }
+            if (result.profile.isDefault) out('  该方案已被设为默认')
+          } else {
+            err('创建失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名方案')
+            }
+          }
+        } catch (e) {
+          err(`创建失败: ${e.message}`)
+        }
+      } else if (sub === 'update') {
+        const ident = args[2]
+        if (!ident) { err('用法: profile update <name|id> [options]'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        try {
+          const updates = buildProfileFromArgs(args)
+          const force = args.indexOf('--force') >= 0
+          const result = exportProfile.updateProfile(resolved.id, updates, { force })
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已更新方案: ${result.profile.name} (${result.profile.id})`)
+          } else {
+            err('更新失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名方案')
+            }
+          }
+        } catch (e) {
+          err(`更新失败: ${e.message}`)
+        }
+      } else if (sub === 'delete') {
+        const ident = args[2]
+        if (!ident) { err('用法: profile delete <name|id>'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        try {
+          const result = exportProfile.deleteProfile(resolved.id)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已删除方案: ${result.deleted.name}`)
+            if (result.wasDefault) out('  被删除的方案是默认方案')
+            if (result.newDefault) {
+              const nd = exportProfile.getProfile(result.newDefault)
+              out(`  新的默认方案: ${nd ? nd.name : result.newDefault}`)
+            }
+          } else {
+            err('删除失败')
+          }
+        } catch (e) {
+          err(`删除失败: ${e.message}`)
+        }
+      } else if (sub === 'default') {
+        const ident = args[2]
+        if (!ident) { err('用法: profile default <name|id>'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        try {
+          const result = exportProfile.setDefault(resolved.id)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已将 "${resolved.profile.name}" 设为默认方案`)
+          } else {
+            err('设置失败')
+          }
+        } catch (e) {
+          err(`设置失败: ${e.message}`)
+        }
+      } else if (sub === 'duplicate') {
+        const ident = args[2]
+        const newName = args[3]
+        if (!ident) { err('用法: profile duplicate <name|id> [newName]'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        try {
+          const result = exportProfile.duplicateProfile(resolved.id, newName)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已复制方案: ${resolved.profile.name} → ${result.profile.name} (${result.profile.id})`)
+          } else {
+            err('复制失败')
+          }
+        } catch (e) {
+          err(`复制失败: ${e.message}`)
+        }
+      } else if (sub === 'export') {
+        const ident = args[2]
+        const outputPath = args[3]
+        if (!ident) { err('用法: profile export <name|id> [outputPath]'); break }
+        const resolved = resolveProfileIdentifier(ident)
+        if (!resolved) { err(`方案不存在: ${ident}`); break }
+        try {
+          if (outputPath) {
+            const r = exportProfile.exportProfileToFile(resolved.id, outputPath)
+            if (r.success) {
+              ok(`方案已导出到文件: ${r.path}`)
+            } else {
+              err(`导出失败: ${(r.errors || []).join('; ')}`)
+            }
+          } else {
+            const r = exportProfile.exportProfileToJson(resolved.id)
+            if (r.success) {
+              out(JSON.stringify(r.data, null, 2))
+            } else {
+              err(`导出失败: ${(r.errors || []).join('; ')}`)
+            }
+          }
+        } catch (e) {
+          err(`导出失败: ${e.message}`)
+        }
+      } else if (sub === 'import') {
+        const target = args[2]
+        if (!target) { err('用法: profile import <file|json> [--name customName] [--force]'); break }
+        try {
+          const fs = require('fs')
+          const pathMod = require('path')
+          const nameIdx = args.indexOf('--name')
+          const opts = { force: args.indexOf('--force') >= 0 }
+          if (nameIdx >= 0 && args[nameIdx + 1]) opts.asName = args[nameIdx + 1]
+          let result
+          let isFile = false
+          if (fs.existsSync(target)) {
+            isFile = true
+          } else if (target.includes('/') || target.includes('\\') || target.endsWith('.json')) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            if (fs.existsSync(absPath)) isFile = true
+          }
+          if (isFile) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            result = exportProfile.importProfileFromFile(absPath, opts)
+          } else {
+            try {
+              const data = JSON.parse(target)
+              result = exportProfile.importProfileFromJson(data, opts)
+            } catch (parseErr) {
+              err(`无法解析输入: 既不是文件路径也不是合法 JSON`)
+              break
+            }
+          }
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已导入方案: ${result.profile.name} (${result.profile.id})`)
+          } else {
+            err('导入失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名方案，或使用 --name 指定新名称')
+            }
+          }
+        } catch (e) {
+          err(`导入失败: ${e.message}`)
+        }
+      } else if (sub === 'logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 10
+        try {
+          const logs = exportProfile.listLogs(isNaN(n) ? 10 : n)
+          if (logs.length === 0) {
+            yellow('暂无方案操作日志')
+          } else {
+            out(`最近 ${logs.length} 条方案操作日志:`)
+            const actionLabels = {
+              create: '创建', update: '更新', delete: '删除',
+              set_default: '设默认', duplicate: '复制', undo: '撤销'
+            }
+            logs.forEach((l, i) => {
+              const lbl = actionLabels[l.action] || l.action
+              out(`  ${i + 1}. [${lbl}] ${l.timestamp}`)
+              if (l.profileName) out(`     方案: ${l.profileName} (${l.profileId})`)
+              if (l.description) out(`     描述: ${l.description}`)
+              if (l.wasDefault) out(`     被删除的是默认方案`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
+        }
+      } else if (sub === 'undo') {
+        try {
+          const result = exportProfile.undoLastChange()
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已撤销: ${result.description} (操作时间: ${result.timestamp})`)
+          } else {
+            err(`撤销失败: ${result.reason || '未知错误'}`)
+          }
+        } catch (e) {
+          err(`撤销失败: ${e.message}`)
+        }
+      } else if (sub === 'undo-peek') {
+        const peek = exportProfile.peekUndo()
+        if (!peek) {
+          yellow('没有可撤销的方案操作')
+        } else {
+          out(`可撤销: ${peek.description} (${peek.timestamp})`)
+        }
+      } else {
+        err('未知 profile 子命令。使用: list | show | create | update | delete | default | duplicate | export | import | logs | undo | undo-peek')
       }
       break
     }

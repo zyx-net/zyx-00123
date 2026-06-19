@@ -175,6 +175,51 @@ function clearRestoreLogs() {
   }
 }
 
+function loadExportProfiles() {
+  const data = load('export_profiles')
+  if (!data || !Array.isArray(data.profiles)) {
+    return { profiles: [], default: null }
+  }
+  return data
+}
+
+function saveExportProfiles(data) {
+  save('export_profiles', data)
+}
+
+function loadExportProfileLogs() {
+  return load('export_profile_logs') || []
+}
+
+function saveExportProfileLogs(logs) {
+  save('export_profile_logs', logs)
+}
+
+function appendExportProfileLog(entry) {
+  const logs = loadExportProfileLogs()
+  logs.push(entry)
+  if (logs.length > 100) {
+    logs.splice(0, logs.length - 100)
+  }
+  saveExportProfileLogs(logs)
+  return logs
+}
+
+function loadExportProfileUndo() {
+  return load('export_profile_undo') || null
+}
+
+function saveExportProfileUndo(snapshot) {
+  save('export_profile_undo', snapshot)
+}
+
+function clearExportProfileUndo() {
+  const fp = filePath('export_profile_undo')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -195,6 +240,14 @@ module.exports = {
   saveRestoreLogs,
   appendRestoreLog,
   clearRestoreLogs,
+  loadExportProfiles,
+  saveExportProfiles,
+  loadExportProfileLogs,
+  saveExportProfileLogs,
+  appendExportProfileLog,
+  loadExportProfileUndo,
+  saveExportProfileUndo,
+  clearExportProfileUndo,
   DATA_DIR,
   BACKUPS_DIR
 }

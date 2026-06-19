@@ -12,6 +12,7 @@ const undo = require('../src/undo')
 const archiver = require('../src/archiver')
 const exporter = require('../src/exporter')
 const configBackup = require('../src/configBackup')
+const exportProfile = require('../src/exportProfile')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -304,8 +305,16 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/export' && method === 'POST') {
     const body = await parseBody(req)
     try {
-      const md = exporter.generateMarkdown(body.version)
-      return sendJson(res, { markdown: md })
+      const opts = {}
+      if (body.profileId) opts.profileId = body.profileId
+      if (body.profileName) opts.profileName = body.profileName
+      if (body.profile) opts.profile = body.profile
+      let profileObj = null
+      if (body.profileId || body.profileName || body.profile) {
+        profileObj = exporter.resolveProfile(opts)
+      }
+      const md = exporter.generateMarkdown(body.version, profileObj)
+      return sendJson(res, { markdown: md, profileId: profileObj ? profileObj.id : null, profileName: profileObj ? profileObj.name : null })
     } catch (e) {
       return sendError(res, e.message)
     }
@@ -314,8 +323,193 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/export/file' && method === 'POST') {
     const body = await parseBody(req)
     try {
-      const fp = exporter.exportToFile(body.version, body.outputDir)
-      return sendJson(res, { path: fp })
+      const opts = {}
+      if (body.profileId) opts.profileId = body.profileId
+      if (body.profileName) opts.profileName = body.profileName
+      if (body.profile) opts.profile = body.profile
+      const result = exporter.exportToFile(body.version, body.outputDir, opts)
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles' && method === 'GET') {
+    try {
+      const profiles = exportProfile.listProfiles()
+      return sendJson(res, { profiles })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = exportProfile.createProfile(body, { force: body.force })
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/default' && method === 'GET') {
+    try {
+      const profile = exportProfile.getDefaultProfileObj()
+      return sendJson(res, { profile })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/default' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.id) return sendError(res, '缺少 id 参数')
+    try {
+      const result = exportProfile.setDefault(body.id)
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/export/profiles/') && method === 'GET') {
+    const id = url.pathname.substring('/api/export/profiles/'.length)
+    if (!id || id === 'default' || id === 'logs' || id === 'undo') {
+    } else {
+      try {
+        const profile = exportProfile.getProfile(id)
+        if (!profile) return sendError(res, `方案不存在: ${id}`, 404)
+        return sendJson(res, { profile })
+      } catch (e) {
+        return sendError(res, e.message)
+      }
+    }
+  }
+
+  if (url.pathname.startsWith('/api/export/profiles/') && method === 'PUT') {
+    const id = url.pathname.substring('/api/export/profiles/'.length)
+    const body = await parseBody(req)
+    try {
+      const result = exportProfile.updateProfile(id, body, { force: body.force })
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/export/profiles/') && method === 'DELETE') {
+    const id = url.pathname.substring('/api/export/profiles/'.length)
+    try {
+      const result = exportProfile.deleteProfile(id)
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/export/profiles/') && url.pathname.endsWith('/duplicate') && method === 'POST') {
+    const id = url.pathname.substring('/api/export/profiles/'.length, url.pathname.length - '/duplicate'.length)
+    const body = await parseBody(req)
+    try {
+      const result = exportProfile.duplicateProfile(id, body.newName)
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/export/profiles/') && url.pathname.endsWith('/export') && method === 'POST') {
+    const id = url.pathname.substring('/api/export/profiles/'.length, url.pathname.length - '/export'.length)
+    const body = await parseBody(req)
+    try {
+      if (body.outputPath) {
+        const result = exportProfile.exportProfileToFile(id, body.outputPath)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+        return sendJson(res, result)
+      } else {
+        const result = exportProfile.exportProfileToJson(id)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+        return sendJson(res, result)
+      }
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/import' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      const opts = { force: body.force }
+      if (body.asName) opts.asName = body.asName
+      if (body.path) {
+        result = exportProfile.importProfileFromFile(body.path, opts)
+      } else if (body.profileData) {
+        result = exportProfile.importProfileFromJson(body.profileData, opts)
+      } else {
+        return sendError(res, '缺少 path 或 profileData 参数')
+      }
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/validate' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.profileData) return sendError(res, '缺少 profileData 参数')
+    const validation = exportProfile.validateProfile(body.profileData)
+    return sendJson(res, validation)
+  }
+
+  if (url.pathname === '/api/export/profiles/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '20', 10)
+    try {
+      const logs = exportProfile.listLogs(isNaN(n) ? 20 : n)
+      return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/undo' && method === 'POST') {
+    try {
+      const result = exportProfile.undoLastChange()
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/export/profiles/undo/peek' && method === 'GET') {
+    try {
+      return sendJson(res, exportProfile.peekUndo())
     } catch (e) {
       return sendError(res, e.message)
     }

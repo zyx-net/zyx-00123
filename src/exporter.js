@@ -2,10 +2,20 @@ const fs = require('fs')
 const path = require('path')
 const store = require('./store')
 const archiver = require('./archiver')
+const exportProfile = require('./exportProfile')
 
-function generateMarkdown(version) {
+function renderTitle(template, version) {
+  if (!template) return `发布说明 - ${version}`
+  return template.replace(/\$\{version\}/g, version)
+}
+
+function generateMarkdown(version, profile) {
   const snapshot = archiver.getArchive(version)
   if (!snapshot) throw new Error(`归档不存在: ${version}`)
+
+  const effectiveProfile = profile
+    ? exportProfile.normalizeProfile(profile)
+    : exportProfile.getDefaultProfileObj()
 
   const commits = snapshot.commits
   const groups = { breaking: [], feature: [], fix: [], other: [] }
@@ -16,86 +26,129 @@ function generateMarkdown(version) {
   })
 
   const lines = []
-  lines.push(`# 发布说明 - ${version}`)
-  lines.push('')
-  lines.push(`> 归档时间: ${snapshot.date}`)
-  lines.push(`> 提交数量: ${snapshot.commitCount}`)
+  const title = renderTitle(effectiveProfile.titleTemplate, version)
+  lines.push(`# ${title}`)
   lines.push('')
 
-  if (groups.breaking.length > 0) {
-    lines.push('## ⚠ 破坏性变更')
-    lines.push('')
-    groups.breaking.forEach(c => {
-      lines.push(formatCommit(c))
-    })
+  const metaLines = []
+  if (effectiveProfile.includeDate) {
+    metaLines.push(`归档时间: ${snapshot.date}`)
+  }
+  metaLines.push(`提交数量: ${snapshot.commitCount}`)
+  if (metaLines.length > 0) {
+    lines.push(`> ${metaLines.join(' | ')}`)
     lines.push('')
   }
 
-  if (groups.feature.length > 0) {
-    lines.push('## ✨ 新功能')
-    lines.push('')
-    groups.feature.forEach(c => {
-      lines.push(formatCommit(c))
-    })
-    lines.push('')
-  }
+  const groupOrder = effectiveProfile.groupOrder && effectiveProfile.groupOrder.length > 0
+    ? effectiveProfile.groupOrder
+    : exportProfile.DEFAULT_GROUP_ORDER
 
-  if (groups.fix.length > 0) {
-    lines.push('## 🐛 修复')
+  groupOrder.forEach(cat => {
+    const list = groups[cat]
+    if (!list || list.length === 0) return
+    const label = exportProfile.CATEGORY_LABELS[cat] || cat
+    lines.push(`## ${label}`)
     lines.push('')
-    groups.fix.forEach(c => {
-      lines.push(formatCommit(c))
+    list.forEach(c => {
+      lines.push(formatCommit(c, effectiveProfile))
     })
     lines.push('')
-  }
-
-  if (groups.other.length > 0) {
-    lines.push('## 📋 其他')
-    lines.push('')
-    groups.other.forEach(c => {
-      lines.push(formatCommit(c))
-    })
-    lines.push('')
-  }
+  })
 
   lines.push('---')
   lines.push('')
   lines.push('## 来源提交详情')
   lines.push('')
   commits.forEach(c => {
-    lines.push(`- **${c.id.substring(0, 8)}** | ${c.message} | ${c.author} | ${c.date}${c.ticket ? ` | 工单: ${c.ticket}` : ''}`)
+    const parts = []
+    parts.push(`- **${c.id.substring(0, 8)}**`)
+    parts.push(c.message)
+    if (effectiveProfile.includeAuthor) parts.push(c.author)
+    if (effectiveProfile.includeDate) parts.push(c.date)
+    if (effectiveProfile.includeTicket && c.ticket) parts.push(`工单: ${c.ticket}`)
+    lines.push(parts.join(' | '))
   })
   lines.push('')
 
   return lines.join('\n')
 }
 
-function formatCommit(c) {
-  const ticket = c.ticket ? ` [${c.ticket}]` : ''
-  const note = c.note ? ` — *${c.note}*` : ''
-  const hash = c.hash ? ` (${c.hash.substring(0, 8)})` : ''
-  return `- ${c.message}${ticket}${hash}${note}`
+function formatCommit(c, profile) {
+  const parts = []
+  parts.push(c.message)
+  if (profile && profile.includeTicket && c.ticket) {
+    parts.push(`[${c.ticket}]`)
+  }
+  if (profile && profile.includeAuthor && c.author) {
+    parts.push(`(${c.author})`)
+  }
+  if (c.hash) {
+    parts.push(`(${c.hash.substring(0, 8)})`)
+  }
+  if (c.note) {
+    parts.push(`— *${c.note}*`)
+  }
+  return `- ${parts.join(' ')}`
 }
 
-function exportToFile(version, outputDir) {
-  const md = generateMarkdown(version)
-  const dir = outputDir || path.join(store.DATA_DIR, '..', 'output')
+function resolveProfile(options) {
+  options = options || {}
+  if (options.profileId) {
+    const p = exportProfile.getProfile(options.profileId)
+    if (!p) throw new Error(`方案不存在: ${options.profileId}`)
+    return p
+  }
+  if (options.profileName) {
+    const p = exportProfile.getProfileByName(options.profileName)
+    if (!p) throw new Error(`方案不存在: ${options.profileName}`)
+    return p
+  }
+  if (options.profile) {
+    return exportProfile.normalizeProfile(options.profile)
+  }
+  return exportProfile.getDefaultProfileObj()
+}
+
+function resolveEffectiveOutputDir(profile, explicitDir) {
+  if (explicitDir) return explicitDir
+  return exportProfile.resolveOutputDir(profile)
+}
+
+function exportToFile(version, outputDir, options) {
+  options = options || {}
+  const profile = resolveProfile(options)
+  const dir = resolveEffectiveOutputDir(profile, outputDir)
+  const writeCheck = exportProfile.checkOutputWritable(dir)
+  if (!writeCheck.writable) {
+    throw new Error(writeCheck.errors.join('; ') || `输出目录不可写: ${dir}`)
+  }
+  const md = generateMarkdown(version, profile)
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true })
   }
   const fp = path.join(dir, `release-${version}.md`)
   fs.writeFileSync(fp, md, 'utf-8')
-  return fp
+  return { path: fp, profileId: profile.id, profileName: profile.name }
 }
 
-function exportAll(outputDir) {
+function exportAll(outputDir, options) {
+  options = options || {}
+  const profile = resolveProfile(options)
   const archives = archiver.listArchives()
   const files = []
   archives.forEach(a => {
-    const fp = exportToFile(a.version, outputDir)
-    files.push(fp)
+    const r = exportToFile(a.version, outputDir, { profile })
+    files.push(r)
   })
   return files
 }
 
-module.exports = { generateMarkdown, exportToFile, exportAll }
+module.exports = {
+  generateMarkdown,
+  formatCommit,
+  exportToFile,
+  exportAll,
+  resolveProfile,
+  resolveEffectiveOutputDir
+}
