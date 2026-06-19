@@ -237,7 +237,7 @@ function serveStatic(res, filePath, contentType) {
   fs.createReadStream(filePath).pipe(res)
 }
 
-module.exports = function startServer(port) {
+function startServer(port) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
 
@@ -265,6 +265,8 @@ module.exports = function startServer(port) {
     console.log(`\x1b[32m发布说明工具 Web 界面已启动: http://localhost:${port}\x1b[0m`)
   })
 }
+
+module.exports = startServer
 
 if (require.main === module) {
   const port = parseInt(process.argv[2], 10) || 3000
