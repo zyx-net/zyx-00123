@@ -54,6 +54,8 @@ document.querySelectorAll('.tab').forEach(btn => {
     }
     if (btn.dataset.tab === 'config') {
       loadConfig()
+      loadBackups()
+      peekRestoreUndo()
     }
   })
 })
@@ -484,6 +486,195 @@ async function resetConfig() {
     showResult('configResult', '已恢复默认配置', 'success')
   } catch (e) {
     showResult('configResult', '恢复失败: ' + e.message, 'error')
+  }
+}
+
+async function exportConfigBackup() {
+  try {
+    const name = document.getElementById('cfgBackupName').value.trim()
+    const result = await api('/api/config/backup', 'POST', { name: name || undefined })
+    let msg = `配置已备份: ${result.filename}`
+    msg += `\n备份ID: ${result.backupId}`
+    msg += `\n校验和: ${result.checksum}`
+    msg += `\n路径: ${result.path}`
+    showResult('configResult', msg, 'success')
+    loadBackups()
+  } catch (e) {
+    showResult('configResult', '备份失败: ' + e.message, 'error')
+  }
+}
+
+async function loadBackups() {
+  try {
+    const list = await api('/api/config/backups', 'GET')
+    const el = document.getElementById('backupsList')
+    if (list.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无备份</p>'
+      return
+    }
+    el.innerHTML = list.map(b => `
+      <div class="archive-item">
+        <div>
+          <div class="archive-info">${escHtml(b.filename)}</div>
+          <div class="archive-meta">${b.created} | ${b.size}B</div>
+        </div>
+        <div>
+          <button onclick="restoreFromBackup('${escHtml(b.filename)}')" class="secondary">恢复此备份</button>
+          <button onclick="deleteBackup('${escHtml(b.filename)}')" class="danger">删除</button>
+        </div>
+      </div>
+    `).join('')
+  } catch (e) {
+    document.getElementById('backupsList').innerHTML = '<p style="color:#e74c3c">加载备份列表失败: ' + e.message + '</p>'
+  }
+}
+
+async function deleteBackup(filename) {
+  if (!confirm('确定删除此备份？')) return
+  try {
+    await api('/api/config/backups', 'DELETE', { filename })
+    loadBackups()
+    showResult('configResult', '已删除备份: ' + filename, 'success')
+  } catch (e) {
+    showResult('configResult', '删除失败: ' + e.message, 'error')
+  }
+}
+
+async function restoreFromBackup(filename) {
+  if (!confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
+  try {
+    const force = document.getElementById('cfgRestoreForce').checked
+    const dryRun = document.getElementById('cfgRestoreDryRun').checked
+    const result = await api('/api/config/restore', 'POST', { filename, force, dryRun })
+    displayRestoreResult(result)
+  } catch (e) {
+    showResult('restoreResult', '恢复失败: ' + e.message, 'error')
+  }
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = e => resolve(e.target.result)
+    reader.onerror = reject
+    reader.readAsText(file)
+  })
+}
+
+async function getRestoreInput() {
+  const fileInput = document.getElementById('cfgRestoreFile')
+  const jsonText = document.getElementById('cfgRestoreJson').value.trim()
+  if (fileInput.files && fileInput.files.length > 0) {
+    const text = await readFileAsText(fileInput.files[0])
+    return JSON.parse(text)
+  } else if (jsonText) {
+    return JSON.parse(jsonText)
+  }
+  return null
+}
+
+async function validateRestoreInput() {
+  try {
+    const backupData = await getRestoreInput()
+    if (!backupData) {
+      showResult('restoreResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    const result = await api('/api/config/validate', 'POST', { backupData })
+    let msg = '校验结果: ' + (result.valid ? '通过' : '失败')
+    if (result.info && result.info.length > 0) msg += '\n\n信息:\n' + result.info.map(i => '  ℹ ' + i).join('\n')
+    if (result.warnings && result.warnings.length > 0) msg += '\n\n警告:\n' + result.warnings.map(w => '  ⚠ ' + w).join('\n')
+    if (result.errors && result.errors.length > 0) msg += '\n\n错误:\n' + result.errors.map(e => '  ✗ ' + e).join('\n')
+    showResult('restoreResult', msg, result.valid ? 'success' : 'error')
+  } catch (e) {
+    showResult('restoreResult', '校验失败: ' + e.message, 'error')
+  }
+}
+
+async function importConfigBackup() {
+  try {
+    const backupData = await getRestoreInput()
+    if (!backupData) {
+      showResult('restoreResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    if (!confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
+    const force = document.getElementById('cfgRestoreForce').checked
+    const dryRun = document.getElementById('cfgRestoreDryRun').checked
+    const result = await api('/api/config/restore', 'POST', { backupData, force, dryRun })
+    displayRestoreResult(result)
+  } catch (e) {
+    showResult('restoreResult', '恢复失败: ' + e.message, 'error')
+  }
+}
+
+function displayRestoreResult(result) {
+  let msg = ''
+  if (result.logs && result.logs.length > 0) msg += '日志:\n' + result.logs.map(l => '  ℹ ' + l).join('\n') + '\n'
+  if (result.warnings && result.warnings.length > 0) msg += '警告:\n' + result.warnings.map(w => '  ⚠ ' + w).join('\n') + '\n'
+  if (result.errors && result.errors.length > 0) msg += '错误:\n' + result.errors.map(e => '  ✗ ' + e).join('\n') + '\n'
+  if (result.success) {
+    if (result.skipped) {
+      msg += '\n已跳过: ' + (result.reason || '')
+      showResult('restoreResult', msg, 'warning')
+    } else if (result.dryRun) {
+      msg += '\n预览模式，未实际写入'
+      if (result.wouldApply && result.wouldApply.length > 0) {
+        msg += '\n\n将应用的变更:\n'
+        result.wouldApply.forEach(c => { msg += '  - ' + c.field + ': ' + JSON.stringify(c.from) + ' → ' + JSON.stringify(c.to) + '\n' })
+      }
+      showResult('restoreResult', msg, 'warning')
+    } else {
+      msg += '\n✓ 配置恢复成功'
+      if (result.changes && result.changes.length > 0) {
+        msg += '\n\n已应用 ' + result.changes.length + ' 处变更'
+      }
+      showResult('restoreResult', msg, 'success')
+      loadConfig()
+      peekRestoreUndo()
+    }
+  } else {
+    showResult('restoreResult', msg || '恢复失败', 'error')
+  }
+}
+
+async function peekRestoreUndo() {
+  try {
+    const snap = await api('/api/config/restore/peek', 'GET')
+    const el = document.getElementById('restoreUndoInfo')
+    if (!snap) {
+      el.textContent = '没有可撤销的配置恢复操作'
+      el.style.color = '#999'
+    } else {
+      let txt = '可撤销的恢复操作:\n'
+      txt += '  来源: ' + (snap.name || snap.backupId) + '\n'
+      txt += '  恢复时间: ' + snap.restoredAt
+      el.textContent = txt
+      el.style.color = '#333'
+    }
+  } catch {
+    document.getElementById('restoreUndoInfo').textContent = '加载失败'
+  }
+}
+
+async function undoLastRestore() {
+  if (!confirm('确定撤销最近一次配置恢复？')) return
+  try {
+    const result = await api('/api/config/restore/undo', 'POST')
+    let msg = ''
+    if (result.logs && result.logs.length > 0) msg += result.logs.join('\n') + '\n'
+    if (result.warnings && result.warnings.length > 0) msg += '警告: ' + result.warnings.join('; ') + '\n'
+    if (result.errors && result.errors.length > 0) msg += '错误: ' + result.errors.join('; ') + '\n'
+    if (result.success) {
+      msg += '✓ 已撤销最近一次配置恢复'
+      showResult('configResult', msg, 'success')
+      loadConfig()
+      peekRestoreUndo()
+    } else {
+      showResult('configResult', msg || result.reason || '撤销失败', 'error')
+    }
+  } catch (e) {
+    showResult('configResult', '撤销失败: ' + e.message, 'error')
   }
 }
 

@@ -10,6 +10,7 @@ const undo = require('../src/undo')
 const archiver = require('../src/archiver')
 const exporter = require('../src/exporter')
 const store = require('../src/store')
+const configBackup = require('../src/configBackup')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -56,6 +57,13 @@ function printHelp() {
     config keywords <category> <words>   设置分类关键字 (逗号分隔)
     config ignore <patterns>             设置忽略模式 (逗号分隔)
     config reset                         恢复默认配置
+    config backup [name]                 导出当前配置为备份文件 (可选自定义名称)
+    config backup-list                   列出所有配置备份
+    config backup-delete <filename>      删除指定备份文件
+    config restore <filename|path>       从备份文件恢复配置
+    config restore-peek                  查看最近一次恢复的撤销信息
+    config undo-restore                  撤销最近一次配置恢复
+    config validate-file <path>          校验备份文件格式
 
   导入提交:
     import git [dir]                     从指定目录导入 git log (默认当前目录)
@@ -136,8 +144,121 @@ function run() {
       } else if (sub === 'reset') {
         config.reset()
         ok('已恢复默认配置')
+      } else if (sub === 'backup') {
+        const name = args.slice(2).join(' ') || undefined
+        try {
+          const result = configBackup.exportBackup(name)
+          ok(`配置已备份: ${result.filename}`)
+          out(`  路径: ${result.path}`)
+          out(`  备份ID: ${result.backupId}`)
+          out(`  校验和: ${result.checksum}`)
+        } catch (e) {
+          err(`备份失败: ${e.message}`)
+        }
+      } else if (sub === 'backup-list') {
+        const list = configBackup.listBackups()
+        if (list.length === 0) {
+          yellow('暂无备份文件')
+        } else {
+          out(`共有 ${list.length} 个备份:`)
+          list.forEach((b, i) => {
+            out(`  ${i + 1}. ${b.filename}`)
+            out(`     创建: ${b.created} | 大小: ${b.size}B`)
+          })
+        }
+      } else if (sub === 'backup-delete') {
+        const filename = args[2]
+        if (!filename) { err('用法: config backup-delete <filename>'); break }
+        const result = configBackup.deleteBackup(filename)
+        if (result.success) {
+          ok(`已删除备份: ${filename}`)
+        } else {
+          err(`删除失败: 备份不存在`)
+        }
+      } else if (sub === 'restore') {
+        const target = args[2]
+        if (!target) { err('用法: config restore <filename|path>'); break }
+        const forceIdx = args.indexOf('--force')
+        const force = forceIdx >= 0
+        try {
+          const fs = require('fs')
+          const pathMod = require('path')
+          let result
+          if (target.includes('/') || target.includes('\\') || target.endsWith('.json')) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            if (fs.existsSync(absPath)) {
+              result = configBackup.importBackupFromFile(absPath, { force })
+            } else {
+              result = configBackup.importBackup(target, { force })
+            }
+          } else {
+            result = configBackup.importBackup(target, { force })
+          }
+          result.logs.forEach(l => out(`  ℹ ${l}`))
+          result.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+          result.errors.forEach(e => err(`  ✗ ${e}`))
+          if (result.success) {
+            if (result.skipped) {
+              yellow(`恢复已跳过 (${result.reason})`)
+            } else {
+              ok('配置恢复成功')
+              if (result.changes && result.changes.length > 0) {
+                out(`  共 ${result.changes.length} 处变更:`)
+                result.changes.forEach(c => {
+                  out(`    - ${c.field}`)
+                })
+              }
+              out(`  可使用 "rn config undo-restore" 撤销本次恢复`)
+            }
+          } else {
+            err('配置恢复失败')
+          }
+        } catch (e) {
+          err(`恢复失败: ${e.message}`)
+        }
+      } else if (sub === 'restore-peek') {
+        const snap = configBackup.peekRestoreUndo()
+        if (!snap) {
+          yellow('没有可撤销的配置恢复操作')
+        } else {
+          out(`可撤销的恢复操作:`)
+          out(`  来源: ${snap.name} (${snap.backupId})`)
+          out(`  恢复时间: ${snap.restoredAt}`)
+          if (snap.sourcePath) out(`  文件路径: ${snap.sourcePath}`)
+        }
+      } else if (sub === 'undo-restore') {
+        const result = configBackup.undoLastRestore()
+        result.logs.forEach(l => out(`  ℹ ${l}`))
+        result.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+        result.errors.forEach(e => err(`  ✗ ${e}`))
+        if (result.success) {
+          ok('已撤销最近一次配置恢复')
+        } else {
+          err(`撤销失败: ${result.reason || '未知错误'}`)
+        }
+      } else if (sub === 'validate-file') {
+        const filePath = args[2]
+        if (!filePath) { err('用法: config validate-file <path>'); break }
+        try {
+          const fs = require('fs')
+          const pathMod = require('path')
+          const absPath = pathMod.isAbsolute(filePath) ? filePath : pathMod.resolve(process.cwd(), filePath)
+          if (!fs.existsSync(absPath)) {
+            err(`文件不存在: ${absPath}`)
+            break
+          }
+          const raw = fs.readFileSync(absPath, 'utf-8')
+          const data = JSON.parse(raw)
+          const validation = configBackup.validateBackupStructure(data)
+          out(`校验结果: ${validation.valid ? '通过' : '失败'}`)
+          validation.info.forEach(i => out(`  ℹ ${i}`))
+          validation.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+          validation.errors.forEach(e => err(`  ✗ ${e}`))
+        } catch (e) {
+          err(`校验失败: ${e.message}`)
+        }
       } else {
-        err('未知 config 子命令。使用: show | set | keywords | ignore | reset')
+        err('未知 config 子命令。使用: show | set | keywords | ignore | reset | backup | backup-list | backup-delete | restore | restore-peek | undo-restore | validate-file')
       }
       break
     }

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "backupId": "config-backup-2026-06-19T18-29-38-633Z-9c2dc49a",
+  "name": "CLI smoke test backup",
+  "createdAt": "2026-06-19T18:29:38.634Z",
+  "config": {
+    "ticketPattern": "(\\w+-\\d+)",
+    "versionPattern": "^v?\\d+\\.\\d+\\.\\d+$",
+    "versionPrefix": "v",
+    "keywords": {
+      "feature": [
+        "feat",
+        "feature",
+        "add",
+        "新增",
+        "支持"
+      ],
+      "fix": [
+        "fix",
+        "bug",
+        "patch",
+        "修复",
+        "补丁"
+      ],
+      "breaking": [
+        "break",
+        "breaking",
+        "remove",
+        "删除",
+        "移除",
+        "废弃"
+      ]
+    },
+    "ignorePatterns": [
+      "^Merge",
+      "^Revert",
+      "^WIP",
+      "^chore:",
+      "^ci:"
+    ]
+  },
+  "checksum": "92a183a2d77727a0e4b2807d4b69ee0036f6e42e22a44d25fbf3221f78980bd4"
+}

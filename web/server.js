@@ -11,6 +11,7 @@ const reviewer = require('../src/reviewer')
 const undo = require('../src/undo')
 const archiver = require('../src/archiver')
 const exporter = require('../src/exporter')
+const configBackup = require('../src/configBackup')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -58,6 +59,75 @@ async function handleApi(req, res, pathname) {
   }
   if (url.pathname === '/api/config/reset' && method === 'POST') {
     return sendJson(res, config.reset())
+  }
+
+  if (url.pathname === '/api/config/backup' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = configBackup.exportBackup(body.name)
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/config/backups' && method === 'GET') {
+    return sendJson(res, configBackup.listBackups())
+  }
+
+  if (url.pathname === '/api/config/backups' && method === 'DELETE') {
+    const body = await parseBody(req)
+    if (!body.filename) return sendError(res, '缺少 filename 参数')
+    return sendJson(res, configBackup.deleteBackup(body.filename))
+  }
+
+  if (url.pathname === '/api/config/restore' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      if (body.path) {
+        result = configBackup.importBackupFromFile(body.path, { force: body.force, dryRun: body.dryRun })
+      } else if (body.filename) {
+        result = configBackup.importBackup(body.filename, { force: body.force, dryRun: body.dryRun })
+      } else if (body.backupData) {
+        const fs = require('fs')
+        const os = require('os')
+        const tmpFile = path.join(os.tmpdir(), `config-upload-${Date.now()}.json`)
+        fs.writeFileSync(tmpFile, JSON.stringify(body.backupData), 'utf-8')
+        result = configBackup.importBackupFromFile(tmpFile, { force: body.force, dryRun: body.dryRun })
+        try { fs.unlinkSync(tmpFile) } catch {}
+      } else {
+        return sendError(res, '缺少 path, filename 或 backupData 参数')
+      }
+      if (!result.success && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/config/restore/undo' && method === 'POST') {
+    const result = configBackup.undoLastRestore()
+    if (!result.success && result.reason) {
+      return sendError(res, result.reason, 400)
+    }
+    if (!result.success && result.errors.length > 0) {
+      return sendError(res, result.errors.join('; '), 400)
+    }
+    return sendJson(res, result)
+  }
+
+  if (url.pathname === '/api/config/restore/peek' && method === 'GET') {
+    return sendJson(res, configBackup.peekRestoreUndo())
+  }
+
+  if (url.pathname === '/api/config/validate' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.backupData) return sendError(res, '缺少 backupData 参数')
+    const validation = configBackup.validateBackupStructure(body.backupData)
+    return sendJson(res, validation)
   }
 
   if (url.pathname === '/api/commits' && method === 'GET') {
