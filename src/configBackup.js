@@ -44,7 +44,18 @@ function buildBackupSnapshot(name) {
 }
 
 function computeChecksum(configData) {
-  const str = JSON.stringify(configData, Object.keys(configData).sort())
+  function canonicalStringify(value) {
+    if (value === null) return 'null'
+    if (Array.isArray(value)) {
+      return '[' + value.map(canonicalStringify).join(',') + ']'
+    }
+    if (typeof value === 'object') {
+      const keys = Object.keys(value).sort()
+      return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(value[k])).join(',') + '}'
+    }
+    return JSON.stringify(value)
+  }
+  const str = canonicalStringify(configData)
   return crypto.createHash('sha256').update(str, 'utf-8').digest('hex')
 }
 
@@ -190,7 +201,6 @@ function validateBackupStructure(data) {
 }
 
 function detectConflict(newConfig, existingConfig) {
-  const conflicts = []
   const changed = []
 
   for (const key of ['ticketPattern', 'versionPattern', 'versionPrefix']) {
@@ -202,15 +212,15 @@ function detectConflict(newConfig, existingConfig) {
   for (const cat of KNOWN_KEYWORD_CATEGORIES) {
     const newKw = (newConfig.keywords && newConfig.keywords[cat]) || []
     const oldKw = (existingConfig.keywords && existingConfig.keywords[cat]) || []
-    if (JSON.stringify(newKw.sort()) !== JSON.stringify(oldKw.sort())) {
-      changed.push({ field: `keywords.${cat}`, from: oldKw, to: newKw })
+    if (JSON.stringify(newKw) !== JSON.stringify(oldKw)) {
+      changed.push({ field: `keywords.${cat}`, from: [...oldKw], to: [...newKw] })
     }
   }
 
   const newIg = newConfig.ignorePatterns || []
   const oldIg = existingConfig.ignorePatterns || []
-  if (JSON.stringify([...newIg].sort()) !== JSON.stringify([...oldIg].sort())) {
-    changed.push({ field: 'ignorePatterns', from: oldIg, to: newIg })
+  if (JSON.stringify(newIg) !== JSON.stringify(oldIg)) {
+    changed.push({ field: 'ignorePatterns', from: [...oldIg], to: [...newIg] })
   }
 
   return { hasConflict: changed.length > 0, changes: changed }
@@ -277,8 +287,9 @@ function importBackupFromFile(filePath, options) {
     return { success: false, errors, warnings, logs }
   }
 
-  const newConfig = data.config
+  const newConfig = JSON.parse(JSON.stringify(data.config))
   const existingConfig = configModule.get()
+  const existingConfigSnapshot = JSON.parse(JSON.stringify(existingConfig))
 
   const conflict = detectConflict(newConfig, existingConfig)
   if (conflict.hasConflict) {
@@ -327,7 +338,7 @@ function importBackupFromFile(filePath, options) {
     backupId: data.backupId || ('imported-' + Date.now()),
     name: data.name || '导入的配置',
     restoredAt: new Date().toISOString(),
-    previousConfig: JSON.parse(JSON.stringify(existingConfig)),
+    previousConfig: existingConfigSnapshot,
     restoredConfig: JSON.parse(JSON.stringify(newConfig)),
     sourcePath: path.resolve(filePath)
   }
@@ -342,7 +353,7 @@ function importBackupFromFile(filePath, options) {
   } catch (e) {
     errors.push(`写入配置失败: ${e.message}`)
     try {
-      store.saveConfig(existingConfig)
+      store.saveConfig(existingConfigSnapshot)
       logs.push('已自动回滚到原配置')
     } catch (rollbackErr) {
       errors.push(`回滚失败！配置可能处于不一致状态: ${rollbackErr.message}`)
@@ -360,7 +371,7 @@ function importBackupFromFile(filePath, options) {
   return {
     success: true,
     restoredConfig: newConfig,
-    previousConfig: existingConfig,
+    previousConfig: existingConfigSnapshot,
     changes: conflict.changes,
     errors,
     warnings,
@@ -389,6 +400,7 @@ function undoLastRestore() {
   }
 
   const currentConfig = configModule.get()
+  const currentConfigSnapshot = JSON.parse(JSON.stringify(currentConfig))
   const logs = []
   const errors = []
   const warnings = []
@@ -406,7 +418,7 @@ function undoLastRestore() {
   } catch (e) {
     errors.push(`撤销失败: ${e.message}`)
     try {
-      store.saveConfig(currentConfig)
+      store.saveConfig(currentConfigSnapshot)
       logs.push('已自动回滚到撤销前的配置')
     } catch (rbErr) {
       errors.push(`回滚失败！配置可能处于不一致状态: ${rbErr.message}`)
@@ -424,7 +436,7 @@ function undoLastRestore() {
   return {
     success: true,
     restoredConfig: undoSnapshot.previousConfig,
-    previousBeforeUndo: currentConfig,
+    previousBeforeUndo: currentConfigSnapshot,
     sourceBackup: undoSnapshot.backupId,
     sourceName: undoSnapshot.name,
     errors,
@@ -467,5 +479,10 @@ module.exports = {
   deleteBackup,
   BACKUP_SCHEMA_VERSION,
   KNOWN_CONFIG_KEYS,
-  KNOWN_KEYWORD_CATEGORIES
+  KNOWN_KEYWORD_CATEGORIES,
+  _testExports: {
+    computeChecksum,
+    detectConflict,
+    buildBackupSnapshot
+  }
 }
