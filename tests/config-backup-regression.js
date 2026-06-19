@@ -82,7 +82,7 @@ function runTests() {
   assertEq(afterModify.keywords.fix, MODIFIED_FIX, '修改后 fix 顺序已更新')
   assertEq(afterModify.ignorePatterns, MODIFIED_IGNORE, '修改后 ignorePatterns 顺序已更新')
 
-  const rest = configBackup.importBackupFromFile(exp.path)
+  const rest = configBackup.importBackupFromFile(exp.path, { force: true })
   assert(rest.success === true, '恢复备份 success')
   const afterRestore = config.get()
   assertEq(afterRestore.keywords.feature, ORDERED_FEATURE, '恢复后 feature 顺序字节级等于备份（Bug 1 回归点）')
@@ -275,7 +275,7 @@ function runTests() {
   cfg3.keywords.feature = ['改后', 'modified-feat']
   cfg3.ignorePatterns = ['^MODIFIED']
   config.update({ ticketPattern: cfg3.ticketPattern, versionPrefix: cfg3.versionPrefix, keywords: cfg3.keywords, ignorePatterns: cfg3.ignorePatterns })
-  const partialR = configBackup.importBackupFromFile(expP.path, { fields: ['keywords.feature', 'ignorePatterns'] })
+  const partialR = configBackup.importBackupFromFile(expP.path, { fields: ['keywords.feature', 'ignorePatterns'], force: true })
   assert(partialR.success === true, '按项恢复 success')
   assert(partialR.isPartial === true, '标记为按项恢复')
   assert(partialR.selectedFields.includes('keywords.feature'), '选中 keywords.feature')
@@ -323,9 +323,9 @@ function runTests() {
   store.clearRestoreLogs()
   const exp6 = configBackup.exportBackup('日志测试')
   config.update({ ticketPattern: 'LOG-TEST' })
-  configBackup.importBackupFromFile(exp6.path)
+  configBackup.importBackupFromFile(exp6.path, { force: true })
   config.update({ ticketPattern: 'LOG-TEST2', ignorePatterns: ['^LOG'] })
-  configBackup.importBackupFromFile(exp6.path, { fields: ['ignorePatterns'] })
+  configBackup.importBackupFromFile(exp6.path, { fields: ['ignorePatterns'], force: true })
   configBackup.undoLastRestore()
   const logs6a = configBackup.listRestoreLogs(20)
   assert(logs6a.length >= 3, '至少有 3 条日志（整包+按项+撤销）')
@@ -351,7 +351,7 @@ function runTests() {
   cfg7b.keywords.feature = ['重启后 feat']
   cfg7b.ignorePatterns = ['^REBOOT']
   config.update({ ticketPattern: cfg7b.ticketPattern, keywords: cfg7b.keywords, ignorePatterns: cfg7b.ignorePatterns })
-  configBackup.importBackupFromFile(exp7.path, { fields: ['keywords.feature'] })
+  configBackup.importBackupFromFile(exp7.path, { fields: ['keywords.feature'], force: true })
   configBackup.undoLastRestore()
   delete require.cache[require.resolve('../src/config')]
   delete require.cache[require.resolve('../src/store')]
@@ -441,14 +441,20 @@ function runTests() {
   const exp14 = configBackup.exportBackup('CLI 按项恢复')
   const cfg14orig = JSON.parse(JSON.stringify(config.get()))
   config.update({ ticketPattern: 'CLI-FIELDS', versionPrefix: 'CF' })
-  const restoreOut = spawnSync(process.execPath, ['bin/cli.js', 'config', 'restore', exp14.filename, '--fields', 'ticketPattern'], { encoding: 'utf-8', cwd: process.cwd() })
+  const restoreOut = spawnSync(process.execPath, ['bin/cli.js', 'config', 'restore', exp14.filename, '--fields', 'ticketPattern', '--force'], { encoding: 'utf-8', cwd: process.cwd() })
   assert(restoreOut.status === 0, 'CLI restore --fields 退出码 0')
   assert(restoreOut.stdout.includes('按项恢复成功'), 'CLI 输出按项恢复成功')
   const cfg14after = config.get()
-  assert(cfg14after.ticketPattern === cfg14orig.ticketPattern, 'CLI 按项恢复 ticketPattern 已恢复')
+  assertEq(cfg14after.ticketPattern, cfg14orig.ticketPattern, 'CLI 按项恢复 ticketPattern 已恢复')
   assert(cfg14after.versionPrefix === 'CF', 'CLI 按项恢复 versionPrefix 保留修改值')
 
   console.log('\n【新功能 15】CLI config restore-logs 命令')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp15 = configBackup.exportBackup('restore-logs 测试')
+  config.update({ ticketPattern: 'LOGS-TEST-15' })
+  configBackup.importBackupFromFile(exp15.path, { force: true })
   const logsOut = spawnSync(process.execPath, ['bin/cli.js', 'config', 'restore-logs'], { encoding: 'utf-8', cwd: process.cwd() })
   assert(logsOut.status === 0, 'CLI restore-logs 退出码 0')
   assert(logsOut.stdout.includes('整包恢复') || logsOut.stdout.includes('按项恢复') || logsOut.stdout.includes('撤销恢复'), 'CLI restore-logs 输出日志操作类型')
@@ -482,8 +488,9 @@ function runTests() {
   config.reset()
   const exp18 = configBackup.exportBackup('未知字段测试')
   config.update({ ticketPattern: 'UNKNOWN-FIELD' })
-  const r18 = configBackup.importBackupFromFile(exp18.path, { fields: ['ticketPattern', 'nonexistent.field', 'badField'] })
-  assert(r18.success === true, '未知字段不导致失败')
+  const r18 = configBackup.importBackupFromFile(exp18.path, { fields: ['versionPrefix', 'nonexistent.field', 'badField'] })
+  assert(r18.success === true, '未知字段不导致失败（versionPrefix 无差异会被跳过）')
+  assert(r18.skipped === true, '无差异字段会被跳过')
   assert(r18.warnings.some(w => w.includes('未知字段') || w.includes('忽略未知')), 'warnings 中提到忽略未知字段')
   assert(!r18.selectedFields.includes('nonexistent.field'), 'selectedFields 过滤掉未知字段')
 
@@ -494,7 +501,7 @@ function runTests() {
   for (let i = 0; i < 5; i++) {
     const expT = configBackup.exportBackup('日志条数测试' + i)
     config.update({ ticketPattern: 'LOG-CNT-' + i })
-    configBackup.importBackupFromFile(expT.path)
+    configBackup.importBackupFromFile(expT.path, { force: true })
   }
   const allLogs = configBackup.listRestoreLogs(100)
   assert(allLogs.length >= 5, '至少 5 条日志')
@@ -515,7 +522,7 @@ function runTests() {
   cfg20m.keywords.feature = ['full', '完整功能']
   cfg20m.ignorePatterns = ['^FULL']
   config.update({ ticketPattern: cfg20m.ticketPattern, versionPrefix: cfg20m.versionPrefix, keywords: cfg20m.keywords, ignorePatterns: cfg20m.ignorePatterns })
-  const fullR = configBackup.importBackupFromFile(exp20.path)
+  const fullR = configBackup.importBackupFromFile(exp20.path, { force: true })
   assert(fullR.success === true, '整包恢复 success')
   assert(fullR.isPartial === false, 'isPartial=false')
   const cfg20r = config.get()
@@ -535,6 +542,159 @@ function runTests() {
   const cfg20Reboot = require('../src/config')
   const cfg20RebootCfg = cfg20Reboot.get()
   assert(cfg20RebootCfg.ticketPattern === 'FULL-TEST', '重启后整包撤销结果保留')
+
+  console.log('\n【新功能 21】冲突阻塞 — 按项恢复冲突字段无 force 时不写入')
+  console.log('  场景: 导出备份 → 修改 ticketPattern 和 keywords.feature → 按项恢复这两个字段，无 force → 校验返回 blocked=true，配置保持修改值')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp21 = configBackup.exportBackup('冲突阻塞测试')
+  const origCfg21 = JSON.parse(JSON.stringify(config.get()))
+  const cfg21m = config.get()
+  cfg21m.ticketPattern = 'BLOCKED-21'
+  cfg21m.keywords.feature = ['blocked-feat']
+  config.update({ ticketPattern: cfg21m.ticketPattern, keywords: cfg21m.keywords })
+  const r21 = configBackup.importBackupFromFile(exp21.path, { fields: ['ticketPattern', 'keywords.feature'] })
+  assert(r21.success === false, '冲突时 success=false')
+  assert(r21.blocked === true, 'blocked=true')
+  assert(r21.reason === 'conflict', 'reason=conflict')
+  assert(Array.isArray(r21.conflictFields), '返回 conflictFields')
+  assert(r21.conflictFields.includes('ticketPattern'), 'conflictFields 含 ticketPattern')
+  assert(r21.conflictFields.includes('keywords.feature'), 'conflictFields 含 keywords.feature')
+  assert(r21.errors.some(e => e.includes('阻止写入') || e.includes('force=true')), 'errors 含阻止写入提示')
+  const cfg21after = config.get()
+  assert(cfg21after.ticketPattern === 'BLOCKED-21', '冲突阻塞后 ticketPattern 保留修改值（根因修复点）')
+  assertEq(cfg21after.keywords.feature, ['blocked-feat'], '冲突阻塞后 keywords.feature 保留修改值（根因修复点）')
+  const logs21 = configBackup.listRestoreLogs(10)
+  assert(logs21.length === 0, '冲突阻塞后不写恢复日志')
+  assert(configBackup.peekRestoreUndo() === null, '冲突阻塞后不保存撤销快照')
+
+  console.log('\n【新功能 22】冲突阻塞 — 加 force=true 可强制覆盖')
+  console.log('  场景: 同上，但加 force=true → 校验写入成功')
+  const r22 = configBackup.importBackupFromFile(exp21.path, { fields: ['ticketPattern', 'keywords.feature'], force: true })
+  assert(r22.success === true, 'force=true 时 success=true')
+  assert(r22.blocked === undefined, 'force=true 时无 blocked 标记')
+  assert(r22.isPartial === true, 'isPartial=true')
+  const cfg22after = config.get()
+  assertEq(cfg22after.ticketPattern, origCfg21.ticketPattern, 'force=true 后 ticketPattern 已恢复')
+  assertEq(cfg22after.keywords.feature, origCfg21.keywords.feature, 'force=true 后 keywords.feature 已恢复')
+
+  console.log('\n【新功能 23】冲突阻塞 — 整包恢复冲突无 force 时也阻止')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp23 = configBackup.exportBackup('整包冲突阻塞测试')
+  const origCfg23 = JSON.parse(JSON.stringify(config.get()))
+  config.update({ ticketPattern: 'BLOCKED-FULL-23', versionPrefix: 'BF23' })
+  const r23 = configBackup.importBackupFromFile(exp23.path)
+  assert(r23.success === false, '整包冲突时 success=false')
+  assert(r23.blocked === true, '整包冲突 blocked=true')
+  assert(r23.reason === 'conflict', '整包冲突 reason=conflict')
+  const cfg23after = config.get()
+  assert(cfg23after.ticketPattern === 'BLOCKED-FULL-23', '整包冲突阻塞后 ticketPattern 保留修改值')
+  assert(cfg23after.versionPrefix === 'BF23', '整包冲突阻塞后 versionPrefix 保留修改值')
+
+  console.log('\n【新功能 24】冲突阻塞 — 整包恢复加 force=true 正常覆盖')
+  const r24 = configBackup.importBackupFromFile(exp23.path, { force: true })
+  assert(r24.success === true, 'force=true 整包恢复成功')
+  assert(r24.isPartial === false, 'isPartial=false')
+  const cfg24after = config.get()
+  assertEq(cfg24after.ticketPattern, origCfg23.ticketPattern, 'force=true 整包恢复后 ticketPattern 一致')
+  assertEq(cfg24after.versionPrefix, origCfg23.versionPrefix, 'force=true 整包恢复后 versionPrefix 一致')
+
+  console.log('\n【新功能 25】冲突阻塞 — 冲突字段不在选中范围内则不阻塞')
+  console.log('  场景: 修改了 ticketPattern 和 keywords.feature，但只恢复 ignorePatterns → 无冲突，正常执行')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp25 = configBackup.exportBackup('冲突范围测试')
+  const orig25 = JSON.parse(JSON.stringify(config.get()))
+  config.update({ ticketPattern: 'NO-BLOCK-25', keywords: { feature: ['no-block'] }, ignorePatterns: ['^MODIFIED-25'] })
+  const r25 = configBackup.importBackupFromFile(exp25.path, { fields: ['ignorePatterns'], force: true })
+  assert(r25.success === true, '未选中冲突字段时恢复成功')
+  assert(r25.blocked === undefined, '未选中冲突字段时无 blocked 标记')
+  const cfg25after = config.get()
+  assert(cfg25after.ticketPattern === 'NO-BLOCK-25', 'ticketPattern 保留修改值')
+  assertEq(cfg25after.ignorePatterns, orig25.ignorePatterns, 'ignorePatterns 已恢复')
+
+  console.log('\n【新功能 26】冲突阻塞 — dry-run 不受冲突影响（可预览）')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp26 = configBackup.exportBackup('dry-run 冲突测试')
+  config.update({ ticketPattern: 'DRY-RUN-CONFLICT-26' })
+  const r26 = configBackup.importBackupFromFile(exp26.path, { fields: ['ticketPattern'], dryRun: true })
+  assert(r26.success === true, 'dry-run 冲突时仍 success=true')
+  assert(r26.dryRun === true, 'dryRun 标记')
+  assert(r26.blocked === undefined, 'dry-run 时无 blocked')
+  const cfg26after = config.get()
+  assert(cfg26after.ticketPattern === 'DRY-RUN-CONFLICT-26', 'dry-run 不修改配置')
+
+  console.log('\n【新功能 27】CLI — 冲突阻塞时给出明确提示，不带 --force 不写入')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp27 = configBackup.exportBackup('CLI 冲突测试')
+  config.update({ ticketPattern: 'CLI-CONFLICT-27' })
+  const cliOut27 = spawnSync(process.execPath, ['bin/cli.js', 'config', 'restore', exp27.filename, '--fields', 'ticketPattern'], { encoding: 'utf-8', cwd: process.cwd() })
+  assert(cliOut27.status !== 0, 'CLI 冲突阻塞时退出码非 0')
+  assert(cliOut27.stderr.includes('阻止写入') || cliOut27.stderr.includes('force=true'), 'CLI 输出含阻止写入提示')
+  assert(cliOut27.stdout.includes('冲突') || cliOut27.stderr.includes('冲突'), 'CLI 输出含冲突提示')
+  const cfg27after = config.get()
+  assert(cfg27after.ticketPattern === 'CLI-CONFLICT-27', 'CLI 冲突阻塞后配置保持修改值')
+
+  console.log('\n【新功能 28】CLI — 加 --force 可强制覆盖冲突')
+  const cliOut28 = spawnSync(process.execPath, ['bin/cli.js', 'config', 'restore', exp27.filename, '--fields', 'ticketPattern', '--force'], { encoding: 'utf-8', cwd: process.cwd() })
+  assert(cliOut28.status === 0, 'CLI --force 退出码 0')
+  assert(cliOut28.stdout.includes('按项恢复成功'), 'CLI --force 输出按项恢复成功')
+  const exp27raw = JSON.parse(fs.readFileSync(exp27.path, 'utf-8'))
+  const cfg28after = config.get()
+  assertEq(cfg28after.ticketPattern, exp27raw.config.ticketPattern, 'CLI --force 后 ticketPattern 已恢复为备份值')
+
+  console.log('\n【新功能 29】冲突阻塞 — 跨模块不污染：冲突检测不修改传入的配置对象')
+  cleanupAll()
+  config.reset()
+  const detect = configBackup._testExports.detectConflict
+  const bkpCfg29 = {
+    ticketPattern: 'T-[0-9]+',
+    versionPattern: '^v',
+    versionPrefix: 'v',
+    keywords: { feature: ['feat'], fix: ['fix'], breaking: ['break'] },
+    ignorePatterns: ['^Merge']
+  }
+  const curCfg29 = {
+    ticketPattern: 'DIRTY-READ-29',
+    versionPattern: '^v',
+    versionPrefix: 'v',
+    keywords: { feature: ['feat', 'dirty-item'], fix: ['fix'], breaking: ['break'] },
+    ignorePatterns: ['^Merge']
+  }
+  const bkpBefore = JSON.stringify(bkpCfg29)
+  const curBefore = JSON.stringify(curCfg29)
+  const res29 = detect(bkpCfg29, curCfg29)
+  assert(res29.hasConflict === true, '检测到冲突')
+  assert(JSON.stringify(bkpCfg29) === bkpBefore, '冲突检测未修改备份配置对象')
+  assert(JSON.stringify(curCfg29) === curBefore, '冲突检测未修改当前配置对象')
+
+  console.log('\n【新功能 30】冲突阻塞 — 恢复日志和撤销链路不被破坏')
+  console.log('  场景: 冲突阻塞（不写入） → force=true 写入 → 撤销 → 校验日志和撤销正常')
+  cleanupAll()
+  config.reset()
+  store.clearRestoreLogs()
+  const exp30 = configBackup.exportBackup('完整链路冲突测试')
+  const orig30 = JSON.parse(JSON.stringify(config.get()))
+  config.update({ ticketPattern: 'FINAL-TEST-30', ignorePatterns: ['^FINAL'] })
+  const r30blocked = configBackup.importBackupFromFile(exp30.path, { fields: ['ticketPattern', 'ignorePatterns'] })
+  assert(r30blocked.blocked === true, '冲突阻塞')
+  const r30ok = configBackup.importBackupFromFile(exp30.path, { fields: ['ticketPattern', 'ignorePatterns'], force: true })
+  assert(r30ok.success === true, 'force 后成功')
+  const logs30 = configBackup.listRestoreLogs(10)
+  assert(logs30.length === 1, '仅写入一次日志（force那次）')
+  assert(logs30[0].action === 'partial_restore', '日志类型是 partial_restore')
+  const undo30 = configBackup.undoLastRestore()
+  assert(undo30.success === true, '撤销成功')
+  const cfg30after = config.get()
+  assert(cfg30after.ticketPattern === 'FINAL-TEST-30', '撤销后回到修改值')
 
   cleanupAll()
   console.log(`\n========== Bug + 新功能 回归测试汇总: 通过 ${pass} / ${pass + fail} ==========`)

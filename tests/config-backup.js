@@ -93,7 +93,7 @@ function runTests() {
   assertEq(cfgAfterDry.keywords.feature, ['custom-feat'], 'dry-run 后实际关键字未变')
 
   console.log('\n6. 实际导入备份恢复配置')
-  const restoreResult = configBackup.importBackupFromFile(exportResult.path)
+  const restoreResult = configBackup.importBackupFromFile(exportResult.path, { force: true })
   assert(restoreResult.success === true, '导入 success')
   assert(restoreResult.skipped !== true, '不是跳过状态')
   assert(Array.isArray(restoreResult.changes), '返回 changes 列表')
@@ -122,7 +122,7 @@ function runTests() {
   assert(undoSnapAfter === null, '撤销后 peek 为空')
 
   console.log('\n9. 重复导入同一份备份 - 先恢复到一致状态，再重复导入应跳过')
-  const restoreResult9a = configBackup.importBackupFromFile(exportResult.path)
+  const restoreResult9a = configBackup.importBackupFromFile(exportResult.path, { force: true })
   assert(restoreResult9a.success === true, '第1次导入 success')
   const restoreResult9b = configBackup.importBackupFromFile(exportResult.path)
   assert(restoreResult9b.success === true, '第2次重复导入 success')

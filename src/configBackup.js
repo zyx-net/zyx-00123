@@ -453,6 +453,23 @@ function importBackupFromFile(filePath, options) {
     const conflictingSelected = effectiveFields.filter(f => conflictFields.includes(f))
     if (conflictingSelected.length > 0) {
       warnings.push(`检测到 ${conflictingSelected.length} 个冲突字段（当前配置在备份导出后已被修改）: ${conflictingSelected.join(', ')}`)
+      if (!force && !dryRun) {
+        errors.push(`检测到冲突，已阻止写入。使用 force=true 可强制覆盖冲突字段。`)
+        logs.push(`冲突字段 ${conflictingSelected.join(', ')} 需要用户明确处理，本次未写入配置。`)
+        return {
+          success: false,
+          blocked: true,
+          reason: 'conflict',
+          conflictFields: conflictingSelected,
+          isPartial,
+          selectedFields: effectiveFields,
+          detailedDiff,
+          conflict,
+          errors,
+          warnings,
+          logs
+        }
+      }
     }
   }
 

@@ -63,7 +63,7 @@ function printHelp() {
     config diff <filename|path>          查看备份与当前配置的逐项差异
     config restore <filename|path>       从备份文件恢复配置
       可选: --fields f1,f2,...         仅恢复指定字段 (按项恢复)
-      可选: --force                     强制恢复 (即使内容重复)
+      可选: --force                     强制恢复 (即使内容重复或存在冲突)
       可选: --dry-run                   仅预览，不实际写入
     config restore-peek                  查看最近一次恢复的撤销信息
     config undo-restore                  撤销最近一次配置恢复
@@ -297,6 +297,7 @@ function run() {
             }
           } else {
             err('配置恢复失败')
+            process.exit(1)
           }
         } catch (e) {
           err(`恢复失败: ${e.message}`)

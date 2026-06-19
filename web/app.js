@@ -542,13 +542,29 @@ async function deleteBackup(filename) {
   }
 }
 
-async function restoreFromBackup(filename) {
-  if (!confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
+async function handleRestoreWithConflictCheck(result, retryFn) {
+  if (result.blocked && result.reason === 'conflict') {
+    const conflictList = result.conflictFields ? result.conflictFields.join(', ') : ''
+    const msg = `⚠ 检测到冲突！\n\n以下字段在备份导出后已被修改：\n${conflictList}\n\n如果继续，将用备份值覆盖当前配置。\n\n是否强制覆盖？`
+    if (confirm(msg)) {
+      const retryResult = await retryFn(true)
+      displayRestoreResult(retryResult)
+    } else {
+      showResult('restoreResult', '已取消：检测到冲突，未写入配置。可勾选"强制覆盖"后重试。', 'warning')
+    }
+    return true
+  }
+  return false
+}
+
+async function restoreFromBackup(filename, forceOverride = false) {
+  if (!forceOverride && !confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
   try {
-    const force = document.getElementById('cfgRestoreForce').checked
+    const force = forceOverride || document.getElementById('cfgRestoreForce').checked
     const dryRun = document.getElementById('cfgRestoreDryRun').checked
     const result = await api('/api/config/restore', 'POST', { filename, force, dryRun })
-    displayRestoreResult(result)
+    const handled = await handleRestoreWithConflictCheck(result, (f) => restoreFromBackup(filename, f))
+    if (!handled) displayRestoreResult(result)
   } catch (e) {
     showResult('restoreResult', '恢复失败: ' + e.message, 'error')
   }
@@ -593,18 +609,22 @@ async function validateRestoreInput() {
   }
 }
 
-async function importConfigBackup() {
+async function importConfigBackup(forceOverride = false) {
   try {
     const backupData = await getRestoreInput()
     if (!backupData) {
       showResult('restoreResult', '请选择文件或粘贴 JSON 内容', 'error')
       return
     }
-    if (!confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
-    const force = document.getElementById('cfgRestoreForce').checked
+    if (!forceOverride && !confirm('确定从此备份恢复配置？当前配置将被覆盖。')) return
+    const force = forceOverride || document.getElementById('cfgRestoreForce').checked
     const dryRun = document.getElementById('cfgRestoreDryRun').checked
     const result = await api('/api/config/restore', 'POST', { backupData, force, dryRun })
-    displayRestoreResult(result)
+    const handled = await handleRestoreWithConflictCheck(result, (f) => {
+      window._pendingForceBackupData = backupData
+      return importConfigBackup(f)
+    })
+    if (!handled) displayRestoreResult(result)
   } catch (e) {
     showResult('restoreResult', '恢复失败: ' + e.message, 'error')
   }
@@ -740,16 +760,16 @@ function cancelPartialRestore() {
   document.getElementById('restoreDiffPanel').classList.add('hidden')
 }
 
-async function confirmPartialRestore() {
+async function confirmPartialRestore(forceOverride = false) {
   const cbs = document.querySelectorAll('.diff-field-cb:checked')
   const fields = Array.from(cbs).map(cb => cb.value)
   if (fields.length === 0) {
     alert('请至少选择一个要恢复的字段')
     return
   }
-  if (!confirm(`确定恢复选中的 ${fields.length} 个字段？\n字段: ${fields.join(', ')}`)) return
+  if (!forceOverride && !confirm(`确定恢复选中的 ${fields.length} 个字段？\n字段: ${fields.join(', ')}`)) return
   try {
-    const force = document.getElementById('cfgRestoreForce').checked
+    const force = forceOverride || document.getElementById('cfgRestoreForce').checked
     const dryRun = document.getElementById('cfgRestoreDryRun').checked
     let result
     if (window._pendingRestoreFilename) {
@@ -760,8 +780,11 @@ async function confirmPartialRestore() {
       showResult('restoreResult', '缺少备份数据', 'error')
       return
     }
-    cancelPartialRestore()
-    displayRestoreResult(result)
+    const handled = await handleRestoreWithConflictCheck(result, (f) => confirmPartialRestore(f))
+    if (!handled) {
+      cancelPartialRestore()
+      displayRestoreResult(result)
+    }
   } catch (e) {
     showResult('restoreResult', '按项恢复失败: ' + e.message, 'error')
   }
