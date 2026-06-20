@@ -15,6 +15,8 @@ const OP_STATUS_ROLLED_BACK = 'rolled_back'
 const OP_STATUS_INTERRUPTED = 'interrupted'
 const OP_STATUS_CONFLICT_BRANCH = 'conflict_branch'
 
+const RECOVERABLE_STATUSES = new Set([OP_STATUS_PENDING, OP_STATUS_INTERRUPTED])
+
 let _interruptHooks = new Map()
 
 function _now() {
@@ -327,11 +329,143 @@ function failOperation(recordId, error) {
   return { success: true }
 }
 
+function _normalizeInterruptedRecords(audit) {
+  let normalized = 0
+  audit.records.forEach(record => {
+    if (record.status === OP_STATUS_PENDING && !record.completedAt) {
+      record.status = OP_STATUS_INTERRUPTED
+      record.interruptStage = record.interruptStage || 'between_begin_and_commit'
+      normalized++
+    }
+  })
+  audit.pendingOps.forEach(pendingOp => {
+    if (pendingOp.status === OP_STATUS_PENDING) {
+      const record = audit.records.find(r => r.id === pendingOp.recordId)
+      if (record && record.status === OP_STATUS_INTERRUPTED) {
+        pendingOp.status = OP_STATUS_INTERRUPTED
+      }
+    }
+  })
+  return normalized
+}
+
+function _applyBeforeSnapshot(record) {
+  if (!record.beforeSnapshot) return { success: false, reason: 'beforeSnapshot 为空' }
+  const snap = record.beforeSnapshot
+  let applied = false
+  let appliedWhat = []
+
+  if (record.action === ACTION_APPLY) {
+    if (snap.commits) {
+      store.saveCommits(JSON.parse(JSON.stringify(snap.commits)))
+      appliedWhat.push('commits')
+    }
+    if (snap.drafts) {
+      store.saveDrafts(JSON.parse(JSON.stringify(snap.drafts)))
+      appliedWhat.push('drafts')
+    }
+    if (appliedWhat.length > 0) applied = true
+  } else if (record.action === ACTION_ARCHIVE) {
+    if (snap.drafts) {
+      store.saveDrafts(JSON.parse(JSON.stringify(snap.drafts)))
+      appliedWhat.push('drafts')
+    }
+    if (snap.commits) {
+      store.saveCommits(JSON.parse(JSON.stringify(snap.commits)))
+      appliedWhat.push('commits')
+    }
+    if (appliedWhat.length > 0) applied = true
+  } else if (record.action === ACTION_IMPORT) {
+    if (snap.drafts) {
+      store.saveDrafts(JSON.parse(JSON.stringify(snap.drafts)))
+      appliedWhat.push('drafts')
+    }
+    if (appliedWhat.length > 0) applied = true
+  }
+
+  if (!applied) {
+    return { success: false, reason: 'beforeSnapshot 不包含可恢复的数据类型' }
+  }
+  return { success: true, recoveryType: 'restored_before_snapshot', appliedWhat }
+}
+
+function _recoverOneRecord(audit, record, undoSnapshot) {
+  const ts = _now()
+  const applyResult = _applyBeforeSnapshot(record)
+
+  if (!applyResult.success) {
+    record.status = OP_STATUS_FAILED
+    record.error = `无法自动恢复: ${applyResult.reason}`
+    record.completedAt = ts
+    const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
+    if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
+    delete audit.lockTable[record.targetKey]
+    _appendInterruption({
+      recordId: record.id,
+      action: record.action,
+      stage: record.interruptStage,
+      type: 'recovery_failed',
+      recovered: false,
+      reason: applyResult.reason === 'beforeSnapshot 为空' ? 'before_snapshot_empty' : 'missing_recoverable_snapshot'
+    })
+    return {
+      recordId: record.id,
+      success: false,
+      action: record.action,
+      reason: applyResult.reason,
+      beforeStatus: OP_STATUS_INTERRUPTED,
+      afterStatus: OP_STATUS_FAILED
+    }
+  }
+
+  record.status = OP_STATUS_RECOVERED
+  record.completedAt = ts
+  record.recoveredFrom = `interrupted_${record.action}`
+  record.recoveryType = applyResult.recoveryType
+  const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
+  if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
+  delete audit.lockTable[record.targetKey]
+  undoSnapshot.recoveredRecordIds.push(record.id)
+  _appendInterruption({
+    recordId: record.id,
+    action: record.action,
+    stage: record.interruptStage,
+    type: 'recovered',
+    recovered: true,
+    recoveryType: applyResult.recoveryType
+  })
+  return {
+    recordId: record.id,
+    success: true,
+    action: record.action,
+    recoveryType: applyResult.recoveryType,
+    beforeStatus: OP_STATUS_INTERRUPTED,
+    afterStatus: OP_STATUS_RECOVERED
+  }
+}
+
+function scanInterruptedOperations() {
+  const audit = _loadAudit()
+  const normalized = _normalizeInterruptedRecords(audit)
+  if (normalized > 0) {
+    _saveAudit(audit)
+    _appendLog({
+      action: 'scan_interrupted',
+      normalizedCount: normalized
+    })
+  }
+  const pending = audit.pendingOps.filter(p => RECOVERABLE_STATUSES.has(p.status))
+  return { success: true, normalized, total: pending.length }
+}
+
 function recoverPendingOperations() {
   const audit = _loadAudit()
-  const pending = audit.pendingOps.filter(p => p.status === OP_STATUS_PENDING || p.status === OP_STATUS_INTERRUPTED)
+  const normalized = _normalizeInterruptedRecords(audit)
+
+  const pending = audit.pendingOps.filter(p => RECOVERABLE_STATUSES.has(p.status))
   if (pending.length === 0) {
-    return { success: true, recovered: 0, total: 0, results: [] }
+    if (normalized > 0) _saveAudit(audit)
+    return { success: true, recovered: 0, total: 0, normalized, results: [] }
   }
 
   const results = []
@@ -352,7 +486,13 @@ function recoverPendingOperations() {
     if (!record) {
       const idx = audit.pendingOps.findIndex(p => p.recordId === pendingOp.recordId)
       if (idx >= 0) audit.pendingOps.splice(idx, 1)
-      results.push({ recordId: pendingOp.recordId, success: false, reason: '审计记录已丢失' })
+      results.push({
+        recordId: pendingOp.recordId,
+        success: false,
+        reason: '审计记录已丢失',
+        beforeStatus: pendingOp.status,
+        afterStatus: 'lost'
+      })
       _appendInterruption({
         recordId: pendingOp.recordId,
         reason: 'audit_record_lost',
@@ -366,98 +506,9 @@ function recoverPendingOperations() {
       record.interruptStage = record.interruptStage || 'between_begin_and_commit'
     }
 
-    if (record.beforeSnapshot) {
-      let restoreSuccess = false
-      if (record.action === ACTION_APPLY && record.beforeSnapshot.commits) {
-        store.saveCommits(JSON.parse(JSON.stringify(record.beforeSnapshot.commits)))
-        if (record.beforeSnapshot.drafts) {
-          store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
-        }
-        record.status = OP_STATUS_RECOVERED
-        record.completedAt = _now()
-        record.recoveredFrom = 'interrupted_apply'
-        record.recoveryType = 'restored_before_snapshot'
-        const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
-        if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
-        delete audit.lockTable[record.targetKey]
-        recovered++
-        undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
-        restoreSuccess = true
-      } else if (record.action === ACTION_ARCHIVE && record.beforeSnapshot.drafts) {
-        store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
-        if (record.beforeSnapshot.commits) {
-          store.saveCommits(JSON.parse(JSON.stringify(record.beforeSnapshot.commits)))
-        }
-        record.status = OP_STATUS_RECOVERED
-        record.completedAt = _now()
-        record.recoveredFrom = 'interrupted_archive'
-        record.recoveryType = 'restored_before_snapshot'
-        const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
-        if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
-        delete audit.lockTable[record.targetKey]
-        recovered++
-        undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
-        restoreSuccess = true
-      } else if (record.action === ACTION_IMPORT && record.beforeSnapshot.drafts) {
-        store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
-        record.status = OP_STATUS_RECOVERED
-        record.completedAt = _now()
-        record.recoveredFrom = 'interrupted_import'
-        record.recoveryType = 'restored_before_snapshot'
-        const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
-        if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
-        delete audit.lockTable[record.targetKey]
-        recovered++
-        undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
-        restoreSuccess = true
-      }
-
-      if (restoreSuccess) {
-        _appendInterruption({
-          recordId: record.id,
-          action: record.action,
-          stage: record.interruptStage,
-          type: 'recovered',
-          recovered: true,
-          recoveryType: 'restored_before_snapshot'
-        })
-      } else {
-        record.status = OP_STATUS_FAILED
-        record.error = '无法自动恢复: beforeSnapshot 不包含可恢复的数据类型'
-        record.completedAt = _now()
-        const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
-        if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
-        delete audit.lockTable[record.targetKey]
-        results.push({ recordId: record.id, success: false, reason: '无法自动恢复: 缺少 beforeSnapshot 数据' })
-        _appendInterruption({
-          recordId: record.id,
-          action: record.action,
-          stage: record.interruptStage,
-          type: 'recovery_failed',
-          recovered: false,
-          reason: 'missing_recoverable_snapshot'
-        })
-      }
-    } else {
-      record.status = OP_STATUS_FAILED
-      record.error = '无法自动恢复: beforeSnapshot 为空'
-      record.completedAt = _now()
-      const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
-      if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
-      delete audit.lockTable[record.targetKey]
-      results.push({ recordId: record.id, success: false, reason: 'beforeSnapshot 为空' })
-      _appendInterruption({
-        recordId: record.id,
-        action: record.action,
-        stage: record.interruptStage,
-        type: 'recovery_failed',
-        recovered: false,
-        reason: 'before_snapshot_empty'
-      })
-    }
+    const result = _recoverOneRecord(audit, record, undoSnapshot)
+    if (result.success) recovered++
+    results.push(result)
   })
 
   _saveAudit(audit)
@@ -469,10 +520,11 @@ function recoverPendingOperations() {
   _appendLog({
     action: 'recover',
     pendingCount: pending.length,
-    recoveredCount: recovered
+    recoveredCount: recovered,
+    normalizedCount: normalized
   })
 
-  return { success: true, recovered, total: pending.length, results }
+  return { success: true, recovered, total: pending.length, normalized, results }
 }
 
 function setInterruptHook(recordId, stage, fn) {
@@ -676,7 +728,9 @@ function getRecord(recordId) {
 
 function getPendingOperations() {
   const audit = _loadAudit()
-  return audit.pendingOps.filter(p => p.status === OP_STATUS_PENDING).slice()
+  const normalized = _normalizeInterruptedRecords(audit)
+  if (normalized > 0) _saveAudit(audit)
+  return audit.pendingOps.filter(p => RECOVERABLE_STATUSES.has(p.status)).slice()
 }
 
 function getLockInfo(targetKey) {
@@ -691,7 +745,9 @@ function getLockTable() {
 
 function getStatus() {
   const audit = _loadAudit()
-  const pending = audit.pendingOps.filter(p => p.status === OP_STATUS_PENDING).length
+  const normalized = _normalizeInterruptedRecords(audit)
+  if (normalized > 0) _saveAudit(audit)
+  const pending = audit.pendingOps.filter(p => RECOVERABLE_STATUSES.has(p.status)).length
   const total = audit.records.length
   const byStatus = {}
   audit.records.forEach(r => {
@@ -1044,6 +1100,7 @@ module.exports = {
   commitOperation,
   failOperation,
   recoverPendingOperations,
+  scanInterruptedOperations,
   rollbackOperation,
   undoLastRecoveryOrRollback,
   peekUndo,

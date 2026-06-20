@@ -2228,7 +2228,7 @@ function run() {
 
     case 'audit': {
       const sub = args[1]
-      if (!sub) { err('用法: audit status|records|show|rollback|pending|recover-pending|undo|undo-peek|locks|export|import|logs'); break }
+      if (!sub) { err('用法: audit status|records|show|rollback|pending|scan-interrupted|recover-pending|undo|undo-peek|locks|export|import|logs'); break }
 
       if (sub === 'status') {
         const status = operationAudit.getStatus()
@@ -2321,21 +2321,39 @@ function run() {
             out(`     创建时间: ${p.createdAt}`)
           })
         }
+      } else if (sub === 'scan-interrupted') {
+        const result = operationAudit.scanInterruptedOperations()
+        if (result.normalized > 0) {
+          ok(`已扫描并标记 ${result.normalized} 条崩溃前未完成操作为 interrupted`)
+        } else {
+          ok('扫描完成，未发现需要标记的未完成操作')
+        }
+        if (result.total > 0) {
+          yellow(`当前待恢复操作共 ${result.total} 条，可使用 audit recover-pending 执行恢复`)
+        } else {
+          ok('当前没有待恢复操作')
+        }
       } else if (sub === 'recover-pending') {
         const result = operationAudit.recoverPendingOperations()
+        if (result.normalized > 0) {
+          yellow(`恢复前自动标记了 ${result.normalized} 条崩溃前未完成操作为 interrupted`)
+        }
         if (result.recovered > 0) {
           ok(`已恢复 ${result.recovered}/${result.total} 条未完成操作`)
           result.results.forEach((r, i) => {
             if (r.success) {
-              out(`  ${i + 1}. ✓ ${r.recordId}`)
+              out(`  ${i + 1}. ✓ ${r.recordId} [${r.beforeStatus} → ${r.afterStatus}]`)
             } else {
-              err(`  ${i + 1}. ✗ ${r.recordId}: ${r.reason || '未知'}`)
+              err(`  ${i + 1}. ✗ ${r.recordId}: ${r.reason || '未知'} [${r.beforeStatus} → ${r.afterStatus}]`)
             }
           })
         } else if (result.total === 0) {
           ok('没有需要恢复的未完成操作')
         } else {
           yellow(`恢复完成: 0/${result.total} 条操作成功恢复`)
+          result.results.forEach((r, i) => {
+            err(`  ${i + 1}. ✗ ${r.recordId}: ${r.reason || '未知'} [${r.beforeStatus} → ${r.afterStatus}]`)
+          })
         }
       } else if (sub === 'undo') {
         const result = operationAudit.undoLastRecoveryOrRollback()
@@ -2424,7 +2442,7 @@ function run() {
           err(`读取日志失败: ${e.message}`)
         }
       } else {
-        err('未知 audit 子命令。使用: status|records|show|rollback|pending|recover-pending|undo|undo-peek|locks|export|import|logs')
+        err('未知 audit 子命令。使用: status|records|show|rollback|pending|scan-interrupted|recover-pending|undo|undo-peek|locks|export|import|logs')
       }
       break
     }

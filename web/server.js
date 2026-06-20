@@ -1277,6 +1277,15 @@ async function handleApi(req, res, pathname) {
     }
   }
 
+  if (url.pathname === '/api/audit/scan-interrupted' && method === 'POST') {
+    try {
+      const result = operationAudit.scanInterruptedOperations()
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
   if (url.pathname === '/api/audit/recover-pending' && method === 'POST') {
     try {
       const result = operationAudit.recoverPendingOperations()
@@ -1469,12 +1478,17 @@ function startServer(port) {
     }
   }
 
-  const auditPending = operationAudit.getPendingOperations()
-  if (auditPending.length > 0) {
-    console.log('\x1b[33m操作来源审计发现未完成操作，正在自动恢复...\x1b[0m')
+  const auditScanResult = operationAudit.scanInterruptedOperations()
+  if (auditScanResult.normalized > 0) {
+    console.log(`\x1b[33m操作来源审计扫描到 ${auditScanResult.normalized} 条崩溃前未完成操作，已标记为 interrupted\x1b[0m`)
+  }
+  if (auditScanResult.total > 0) {
+    console.log(`\x1b[33m操作来源审计发现 ${auditScanResult.total} 条待恢复操作，正在自动恢复...\x1b[0m`)
     const auditResult = operationAudit.recoverPendingOperations()
     if (auditResult.recovered > 0) {
       console.log(`\x1b[32m操作来源审计自动恢复完成: ${auditResult.recovered}/${auditResult.total} 条操作已恢复\x1b[0m`)
+    } else if (auditResult.total > 0) {
+      console.log(`\x1b[33m操作来源审计自动恢复: 0/${auditResult.total} 条操作成功恢复\x1b[0m`)
     }
   }
 
