@@ -3,6 +3,7 @@ const config = require('./config')
 const validator = require('./validator')
 const archiver = require('./archiver')
 const versionRegistry = require('./versionRegistry')
+const draftVault = require('./draftVault')
 const crypto = require('crypto')
 
 function genId() {
@@ -73,6 +74,20 @@ function createDraft(options) {
     }
   }
 
+  const currentCommits = store.loadCommits()
+  const filteredCommits = options.commits
+    ? options.commits
+    : currentCommits.filter(c => c.category !== 'ignored')
+
+  const vaultSnap = draftVault.createSnapshot(null, draftVault.ACTION_CREATE, options._vaultSource || draftVault.SOURCE_CLI, {
+    operator: userId,
+    operatorName: userName,
+    draftName: name,
+    version,
+    summary: description,
+    body: JSON.parse(JSON.stringify(filteredCommits))
+  })
+
   let occupyResult = null
   if (version) {
     occupyResult = versionRegistry.occupyVersion(version, {
@@ -84,6 +99,7 @@ function createDraft(options) {
       reason: takeoverReason
     })
     if (!occupyResult.success) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, occupyResult.errors.join('; '))
       return {
         success: false,
         errors: occupyResult.errors,
@@ -93,11 +109,6 @@ function createDraft(options) {
       }
     }
   }
-
-  const commits = store.loadCommits()
-  const filteredCommits = options.commits
-    ? options.commits
-    : commits.filter(c => c.category !== 'ignored')
 
   const cfg = config.get()
   const now = new Date().toISOString()
@@ -137,6 +148,7 @@ function createDraft(options) {
   try {
     store.saveDrafts(drafts)
   } catch (e) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, e.message)
     if (version && occupyResult && occupyResult.success) {
       versionRegistry.undoLastChange({ userId, userName })
     }
@@ -154,6 +166,7 @@ function createDraft(options) {
       isAdmin: true
     })
     if (!updateResult.success) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, updateResult.errors.join('; '))
       store.saveDrafts(draftsBefore)
       return {
         success: false,
@@ -174,6 +187,8 @@ function createDraft(options) {
   })
 
   _saveUndoSnapshot('create', draft.id, `创建草稿: ${name}`, null, draftsBefore)
+
+  draftVault.commitSnapshot(vaultSnap.snapshotId)
 
   return {
     success: true,
@@ -215,6 +230,13 @@ function updateDraft(id, updates, options) {
     }
   }
 
+  const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_UPDATE, options._vaultSource || draftVault.SOURCE_CLI, {
+    operator: userId || 'anonymous',
+    operatorName: userName || '匿名用户',
+    draftName: oldDraft.name,
+    version: newVersion
+  })
+
   if (newVersion !== oldDraft.version) {
     const vr = versionRegistry.updateEntryForDraft(id, newName, newVersion, {
       userId,
@@ -224,6 +246,7 @@ function updateDraft(id, updates, options) {
       reason: takeoverReason
     })
     if (!vr.success) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, vr.errors.join('; '))
       return {
         success: false,
         errors: vr.errors,
@@ -253,7 +276,13 @@ function updateDraft(id, updates, options) {
 
   const draftsBefore = JSON.parse(JSON.stringify(drafts))
   drafts[idx] = updated
-  store.saveDrafts(drafts)
+
+  try {
+    store.saveDrafts(drafts)
+  } catch (e) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, e.message)
+    return { success: false, errors: [`保存草稿失败: ${e.message}`], blocked: false }
+  }
 
   store.appendDraftLog({
     action: 'update',
@@ -265,6 +294,8 @@ function updateDraft(id, updates, options) {
   })
 
   _saveUndoSnapshot('update', id, `更新草稿: ${updated.name}`, oldDraft, draftsBefore)
+
+  draftVault.commitSnapshot(vaultSnap.snapshotId)
 
   return { success: true, draft: updated }
 }
@@ -316,6 +347,13 @@ function duplicateDraft(id, newName, options) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
   }
 
+  const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_DUPLICATE, options._vaultSource || draftVault.SOURCE_CLI, {
+    operator: userId || 'anonymous',
+    operatorName: userName || '匿名用户',
+    draftName: draftObj.name,
+    version: draftObj.version
+  })
+
   const name = newName || `${draftObj.name} (副本)`
 
   const effectiveVersion = options.version !== undefined ? options.version : draftObj.version
@@ -326,6 +364,7 @@ function duplicateDraft(id, newName, options) {
   const byName = findDuplicateName(name)
 
   if ((resolve === 'force' || resolve === 'overwrite') && isAdmin && !takeoverReason) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, '管理员强制接管必须提供接管理由')
     return {
       success: false,
       errors: ['管理员强制接管必须提供接管理由'],
@@ -377,6 +416,7 @@ function duplicateDraft(id, newName, options) {
           existingId = versionConflict.existing.draftId
         }
       }
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, errors.join('; '))
       return {
         success: false,
         errors,
@@ -419,11 +459,12 @@ function duplicateDraft(id, newName, options) {
         }
       }
       const sourceWithNewVersion = { ...draftObj, version: finalVersion }
-      return _doDuplicateDraft(sourceWithNewVersion, finalName, { userId, userName })
+      return _doDuplicateDraft(sourceWithNewVersion, finalName, { userId, userName, snapshotId: vaultSnap.snapshotId })
     }
 
     if (resolve === 'overwrite') {
       if (!byName) {
+        draftVault.markSnapshotFailed(vaultSnap.snapshotId, '覆盖模式需要指定已存在的同名草稿')
         return {
           success: false,
           errors: ['覆盖模式需要指定已存在的同名草稿'],
@@ -431,19 +472,20 @@ function duplicateDraft(id, newName, options) {
           reason: 'no_name_match'
         }
       }
-      return _doOverwriteDraft(sourceDraftForOperation, name, byName, { userId, userName, isAdmin, takeoverReason })
+      return _doOverwriteDraft(sourceDraftForOperation, name, byName, { userId, userName, isAdmin, takeoverReason, snapshotId: vaultSnap.snapshotId })
     }
 
     if (resolve === 'force' && isAdmin && versionConflict) {
-      return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName, isAdmin, force: true, takeoverReason })
+      return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName, isAdmin, force: true, takeoverReason, snapshotId: vaultSnap.snapshotId })
     }
   }
 
-  return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName })
+  return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName, snapshotId: vaultSnap.snapshotId })
 }
 
 function _doDuplicateDraft(sourceDraft, newName, options) {
   options = options || {}
+  const snapshotId = options.snapshotId
   const draftsBefore = store.loadDrafts()
   const now = new Date().toISOString()
 
@@ -458,6 +500,7 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
       reason: options.takeoverReason || ''
     })
     if (!occupyResult.success) {
+      if (snapshotId) draftVault.markSnapshotFailed(snapshotId, occupyResult.errors.join('; '))
       return {
         success: false,
         errors: occupyResult.errors,
@@ -482,6 +525,7 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
   try {
     store.saveDrafts(drafts)
   } catch (e) {
+    if (snapshotId) draftVault.markSnapshotFailed(snapshotId, e.message)
     if (sourceDraft.version && occupyResult && occupyResult.success) {
       versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
     }
@@ -499,6 +543,7 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
       isAdmin: true
     })
     if (!updateResult.success) {
+      if (snapshotId) draftVault.markSnapshotFailed(snapshotId, updateResult.errors.join('; '))
       store.saveDrafts(draftsBefore)
       return {
         success: false,
@@ -522,11 +567,14 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
 
   _pushUndoSnapshot('duplicate', newDraft.id, `复制草稿: ${sourceDraft.name} → ${newName}`, null, draftsBefore)
 
+  if (snapshotId) draftVault.commitSnapshot(snapshotId)
+
   return { success: true, draft: newDraft, versionRegistryEntry: occupyResult ? occupyResult.entry : null, tookOver: occupyResult ? occupyResult.tookOver : false }
 }
 
 function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   options = options || {}
+  const snapshotId = options.snapshotId
   const draftsBefore = JSON.parse(JSON.stringify(store.loadDrafts()))
   const now = new Date().toISOString()
 
@@ -542,6 +590,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
         reason: options.takeoverReason || ''
       })
       if (!occupyResult.success) {
+        if (snapshotId) draftVault.markSnapshotFailed(snapshotId, occupyResult.errors.join('; '))
         return {
           success: false,
           errors: occupyResult.errors,
@@ -565,6 +614,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
         draftId: existingDraft.id
       })
       if (!occupyResult.success) {
+        if (snapshotId) draftVault.markSnapshotFailed(snapshotId, occupyResult.errors.join('; '))
         return {
           success: false,
           errors: occupyResult.errors,
@@ -587,6 +637,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   const drafts = store.loadDrafts()
   const idx = drafts.findIndex(d => d.id === existingDraft.id)
   if (idx < 0) {
+    if (snapshotId) draftVault.markSnapshotFailed(snapshotId, `目标草稿不存在: ${existingDraft.id}`)
     if (sourceDraft.version && occupyResult && occupyResult.success) {
       versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
     }
@@ -597,6 +648,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   try {
     store.saveDrafts(drafts)
   } catch (e) {
+    if (snapshotId) draftVault.markSnapshotFailed(snapshotId, e.message)
     if (sourceDraft.version && occupyResult && occupyResult.success) {
       versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
     }
@@ -614,6 +666,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
       isAdmin: true
     })
     if (!updateResult.success) {
+      if (snapshotId) draftVault.markSnapshotFailed(snapshotId, updateResult.errors.join('; '))
       store.saveDrafts(draftsBefore)
       return {
         success: false,
@@ -639,6 +692,8 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
 
   _pushUndoSnapshot('duplicate_overwrite', overwrittenDraft.id, `覆盖复制草稿: ${sourceDraft.name} → ${targetName}`, existingDraft, draftsBefore)
 
+  if (snapshotId) draftVault.commitSnapshot(snapshotId)
+
   return { success: true, draft: overwrittenDraft, overwritten: true, versionRegistryEntry: occupyResult ? occupyResult.entry : null }
 }
 
@@ -648,8 +703,21 @@ function applyDraft(id) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
   }
 
+  const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_APPLY, draftVault.SOURCE_CLI, {
+    operator: 'anonymous',
+    operatorName: '匿名用户',
+    draftName: draft.name,
+    version: draft.version
+  })
+
   const currentCommits = store.loadCommits()
-  store.saveCommits(JSON.parse(JSON.stringify(draft.commits)))
+
+  try {
+    store.saveCommits(JSON.parse(JSON.stringify(draft.commits)))
+  } catch (e) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, e.message)
+    return { success: false, errors: [`应用草稿失败: ${e.message}`], blocked: false }
+  }
 
   const now = new Date().toISOString()
   store.appendDraftLog({
@@ -659,6 +727,8 @@ function applyDraft(id) {
     timestamp: now,
     description: `应用草稿: ${draft.name}`
   })
+
+  draftVault.commitSnapshot(vaultSnap.snapshotId)
 
   return {
     success: true,
@@ -679,6 +749,13 @@ function archiveDraft(id, options) {
     return { success: false, errors: ['草稿未设置版本号，无法归档'], blocked: false }
   }
 
+  const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_ARCHIVE, (options._vaultSource || draftVault.SOURCE_CLI), {
+    operator: options.userId || 'anonymous',
+    operatorName: options.userName || '匿名用户',
+    draftName: draft.name,
+    version: draft.version
+  })
+
   const currentCommits = store.loadCommits()
 
   try {
@@ -686,6 +763,7 @@ function archiveDraft(id, options) {
 
     const check = validator.checkArchiveReadiness(draft.version)
     if (!check.ready) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, check.reason)
       store.saveCommits(currentCommits)
       return { success: false, errors: [check.reason], blocked: false }
     }
@@ -717,8 +795,11 @@ function archiveDraft(id, options) {
       description: `归档草稿: ${draft.name} → ${draft.version}`
     })
 
+    draftVault.commitSnapshot(vaultSnap.snapshotId)
+
     return { success: true, snapshot, draft }
   } catch (e) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, e.message)
     store.saveCommits(currentCommits)
     return { success: false, errors: [e.message], blocked: false }
   }
@@ -906,6 +987,13 @@ function importDraftFromJson(data, options) {
     }
   }
 
+  const vaultSnap = draftVault.createSnapshot(null, draftVault.ACTION_IMPORT, options._vaultSource || draftVault.SOURCE_CLI, {
+    operator: userId || 'anonymous',
+    operatorName: userName || '匿名用户',
+    draftName: name,
+    version: draftData.version || ''
+  })
+
   let occupyResult = null
   if (draftData.version) {
     occupyResult = versionRegistry.occupyVersion(draftData.version, {
@@ -917,6 +1005,7 @@ function importDraftFromJson(data, options) {
       reason: takeoverReason
     })
     if (!occupyResult.success) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, occupyResult.errors.join('; '))
       return {
         success: false,
         errors: occupyResult.errors,
@@ -959,6 +1048,7 @@ function importDraftFromJson(data, options) {
   try {
     store.saveDrafts(drafts)
   } catch (e) {
+    draftVault.markSnapshotFailed(vaultSnap.snapshotId, e.message)
     if (draftData.version && occupyResult && occupyResult.success) {
       versionRegistry.undoLastChange({ userId, userName })
     }
@@ -976,6 +1066,7 @@ function importDraftFromJson(data, options) {
       isAdmin: true
     })
     if (!updateResult.success) {
+      draftVault.markSnapshotFailed(vaultSnap.snapshotId, updateResult.errors.join('; '))
       store.saveDrafts(draftsBefore)
       return {
         success: false,
@@ -996,6 +1087,8 @@ function importDraftFromJson(data, options) {
   })
 
   _saveUndoSnapshot('import', newDraft.id, `导入草稿: ${name}`, null, draftsBefore)
+
+  draftVault.commitSnapshot(vaultSnap.snapshotId)
 
   return {
     success: true,

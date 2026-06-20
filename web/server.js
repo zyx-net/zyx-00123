@@ -15,6 +15,7 @@ const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
 const versionRegistry = require('../src/versionRegistry')
+const draftVault = require('../src/draftVault')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -529,7 +530,7 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/drafts' && method === 'POST') {
     const body = await parseBody(req)
     try {
-      const result = draft.createDraft(body)
+      const result = draft.createDraft({ ...body, _vaultSource: 'web' })
       if (!result.success && result.errors && result.errors.length > 0) {
         return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
       }
@@ -557,7 +558,7 @@ async function handleApi(req, res, pathname) {
     const id = url.pathname.substring('/api/drafts/'.length)
     const body = await parseBody(req)
     try {
-      const result = draft.updateDraft(id, body, { force: body.force })
+      const result = draft.updateDraft(id, body, { force: body.force, _vaultSource: 'web' })
       if (!result.success && result.errors && result.errors.length > 0) {
         return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
       }
@@ -584,7 +585,7 @@ async function handleApi(req, res, pathname) {
     const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/duplicate'.length)
     const body = await parseBody(req)
     try {
-      const opts = {}
+      const opts = { _vaultSource: 'web' }
       if (body.resolve) opts.resolve = body.resolve
       const result = draft.duplicateDraft(id, body.newName, opts)
       if (!result.success && result.errors && result.errors.length > 0) {
@@ -661,7 +662,7 @@ async function handleApi(req, res, pathname) {
     const body = await parseBody(req)
     try {
       let result
-      const opts = { force: body.force }
+      const opts = { force: body.force, _vaultSource: 'web' }
       if (body.asName) opts.asName = body.asName
       if (body.path) {
         result = draft.importDraftFromFile(body.path, opts)
@@ -959,6 +960,197 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, reviewer.listUnreviewed())
   }
 
+  if (url.pathname === '/api/vault/status' && method === 'GET') {
+    try {
+      return sendJson(res, draftVault.getStatus())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/snapshots' && method === 'GET') {
+    try {
+      const options = {}
+      const draftId = url.searchParams.get('draftId')
+      const action = url.searchParams.get('action')
+      const status = url.searchParams.get('status')
+      const source = url.searchParams.get('source')
+      const operator = url.searchParams.get('operator')
+      if (draftId) options.draftId = draftId
+      if (action) options.action = action
+      if (status) options.status = status
+      if (source) options.source = source
+      if (operator) options.operator = operator
+      return sendJson(res, { snapshots: draftVault.listSnapshots(options) })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/vault/snapshots/') && url.pathname.endsWith('/commit') && method === 'POST') {
+    const id = url.pathname.substring('/api/vault/snapshots/'.length, url.pathname.length - '/commit'.length)
+    try {
+      const result = draftVault.commitSnapshot(id)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/vault/snapshots/') && url.pathname.endsWith('/recover') && method === 'POST') {
+    const id = url.pathname.substring('/api/vault/snapshots/'.length, url.pathname.length - '/recover'.length)
+    const body = await parseBody(req)
+    try {
+      const result = draftVault.recoverFromSnapshot(id, { conflictResolution: body.conflictResolution })
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/vault/snapshots/') && url.pathname.endsWith('/rollback') && method === 'POST') {
+    const id = url.pathname.substring('/api/vault/snapshots/'.length, url.pathname.length - '/rollback'.length)
+    const body = await parseBody(req)
+    try {
+      const result = draftVault.rollbackSnapshot(id, body)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/vault/snapshots/') && method === 'GET') {
+    const id = url.pathname.substring('/api/vault/snapshots/'.length)
+    try {
+      const snapshot = draftVault.getSnapshot(id)
+      if (!snapshot) return sendError(res, `快照不存在: ${id}`, 404)
+      return sendJson(res, { snapshot })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/vault/snapshots/') && method === 'DELETE') {
+    const id = url.pathname.substring('/api/vault/snapshots/'.length)
+    try {
+      const result = draftVault.archiveSnapshot(id)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/pending' && method === 'GET') {
+    try {
+      return sendJson(res, { pending: draftVault.findPendingTxns() })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/recover-pending' && method === 'POST') {
+    try {
+      const result = draftVault.recoverPendingTxns()
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/undo-recovery' && method === 'POST') {
+    try {
+      const result = draftVault.undoLastRecovery()
+      if (!result.success && result.reason) {
+        return sendError(res, result.reason, 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/undo-recovery/peek' && method === 'GET') {
+    try {
+      return sendJson(res, draftVault.peekRecoveryUndo())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/resolve-conflict' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = draftVault.resolveConflict(body.snapshotId, body.resolution, body)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/export' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      if (body.outputPath) {
+        result = draftVault.exportVaultToFile(body.outputPath, body)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+      } else {
+        result = draftVault.exportVaultToJson(body)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/import' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      const opts = { force: body.force }
+      if (body.path) {
+        result = draftVault.importVaultFromFile(body.path, opts)
+      } else if (body.vaultData) {
+        result = draftVault.importVaultFromJson(body.vaultData, opts)
+      } else {
+        return sendError(res, '缺少 path 或 vaultData 参数')
+      }
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/vault/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '50', 10)
+    try {
+      const logs = draftVault.listLogs(isNaN(n) ? 50 : n)
+      return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
   sendError(res, `未找到接口: ${method} ${url.pathname}`, 404)
 }
 
@@ -1005,6 +1197,15 @@ function startServer(port) {
     })
   } else if (reconcileResult.ok) {
     console.log('\x1b[32m版本注册表一致性检查通过，无需修复\x1b[0m')
+  }
+
+  const vaultPending = draftVault.findPendingTxns()
+  if (vaultPending.length > 0) {
+    console.log('\x1b[33m草稿恢复保险箱发现未完成事务，正在自动恢复...\x1b[0m')
+    const vaultResult = draftVault.recoverPendingTxns()
+    if (vaultResult.recovered > 0) {
+      console.log(`\x1b[32m草稿恢复保险箱自动恢复完成: ${vaultResult.recovered}/${vaultResult.total} 条事务已恢复\x1b[0m`)
+    }
   }
 
   server.listen(port, () => {

@@ -324,6 +324,47 @@ function clearVersionRegistryUndo() {
   }
 }
 
+function loadDraftVault() {
+  return load('draft_vault') || null
+}
+
+function saveDraftVault(data) {
+  save('draft_vault', data)
+}
+
+function loadDraftVaultLogs() {
+  return load('draft_vault_logs') || []
+}
+
+function saveDraftVaultLogs(logs) {
+  save('draft_vault_logs', logs)
+}
+
+function appendDraftVaultLog(entry) {
+  const logs = loadDraftVaultLogs()
+  logs.push(entry)
+  if (logs.length > 200) {
+    logs.splice(0, logs.length - 200)
+  }
+  saveDraftVaultLogs(logs)
+  return logs
+}
+
+function loadDraftVaultRecoveryUndo() {
+  return load('draft_vault_recovery_undo') || null
+}
+
+function saveDraftVaultRecoveryUndo(snapshot) {
+  save('draft_vault_recovery_undo', snapshot)
+}
+
+function clearDraftVaultRecoveryUndo() {
+  const fp = filePath('draft_vault_recovery_undo')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -372,6 +413,14 @@ module.exports = {
   loadVersionRegistryUndo,
   saveVersionRegistryUndo,
   clearVersionRegistryUndo,
+  loadDraftVault,
+  saveDraftVault,
+  loadDraftVaultLogs,
+  saveDraftVaultLogs,
+  appendDraftVaultLog,
+  loadDraftVaultRecoveryUndo,
+  saveDraftVaultRecoveryUndo,
+  clearDraftVaultRecoveryUndo,
   DATA_DIR,
   BACKUPS_DIR
 }

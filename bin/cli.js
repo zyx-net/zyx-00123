@@ -14,6 +14,7 @@ const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
 const versionRegistry = require('../src/versionRegistry')
+const draftVault = require('../src/draftVault')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -206,6 +207,35 @@ function printHelp() {
     version import <file|json> [options]  导入版本占用登记 JSON
       可选: --force                     冲突时覆盖
     version reconcile                   跨重启数据一致性校验与恢复
+
+  草稿恢复保险箱:
+    vault status                         查看保险箱状态
+    vault snapshots [options]            列出快照
+      可选: --status <status>           按状态过滤 (pending|committed|recovered|rolled_back|archived)
+      可选: --action <action>           按操作类型过滤 (create|update|duplicate|apply|import|archive|version_change)
+      可选: --source <source>           按来源过滤 (web|cli)
+      可选: --operator <name>           按操作者过滤
+    vault show <snapshotId>              查看快照详情
+    vault commit <snapshotId>            提交快照 (标记操作成功完成)
+    vault recover <snapshotId> [options] 从快照恢复
+      可选: --conflict <prefer_body|abort|rename_on_conflict>  冲突处理策略 (默认 prefer_body，优先还原正文)
+    vault rollback <snapshotId>          回滚快照 (还原到操作前状态)
+    vault archive <snapshotId>           归档快照 (释放快照存储空间)
+    vault clean                          清理已归档快照
+    vault pending                        查看未完成事务
+    vault recover-pending                自动恢复所有未完成事务
+    vault undo-recovery                  撤销最近一次恢复或回滚
+    vault undo-recovery-peek             查看可撤销的恢复操作
+    vault resolve <snapshotId> <resolution> [options]  解决冲突
+      resolution: takeover|change_version|clear_version|rename|auto_rename|overwrite
+      可选: --new-version <ver>         新版本号 (change_version 时)
+      可选: --new-name <name>           新名称 (rename 时)
+      可选: --admin                     管理员操作 (takeover/overwrite)
+      可选: --reason <text>             操作理由
+    vault export [outputPath]            导出保险箱数据为 JSON
+    vault import <file>                  导入保险箱 JSON
+      可选: --force                     冲突时覆盖
+    vault logs [n]                       查看最近 n 条保险箱操作日志 (默认 20)
 
   其他:
     web [port]                           启动 Web 界面 (默认 3000)
@@ -1850,6 +1880,249 @@ function run() {
         }
       } else {
         err('未知 version 子命令。使用: list | show | check | preoccupy | release | takeover | logs | undo | undo-peek | export | import | reconcile')
+      }
+      break
+    }
+
+    case 'vault': {
+      const sub = args[1]
+      if (!sub) { err('用法: vault status|snapshots|show|commit|recover|rollback|archive|clean|pending|recover-pending|undo-recovery|undo-recovery-peek|resolve|export|import|logs'); break }
+
+      if (sub === 'status') {
+        const status = draftVault.getStatus()
+        out(`保险箱状态:`)
+        out(`  总快照数: ${status.totalSnapshots}`)
+        out(`  未完成事务: ${status.pendingTransactions}`)
+        out(`  各状态统计:`)
+        Object.keys(status.byStatus).forEach(s => {
+          out(`    ${s}: ${status.byStatus[s]}`)
+        })
+        out(`  有可撤销的恢复操作: ${status.hasRecoveryUndo ? '是' : '否'}`)
+      } else if (sub === 'snapshots') {
+        const opts = {}
+        const statusIdx = args.indexOf('--status')
+        const actionIdx = args.indexOf('--action')
+        const sourceIdx = args.indexOf('--source')
+        const operatorIdx = args.indexOf('--operator')
+        if (statusIdx >= 0 && args[statusIdx + 1]) opts.status = args[statusIdx + 1]
+        if (actionIdx >= 0 && args[actionIdx + 1]) opts.action = args[actionIdx + 1]
+        if (sourceIdx >= 0 && args[sourceIdx + 1]) opts.source = args[sourceIdx + 1]
+        if (operatorIdx >= 0 && args[operatorIdx + 1]) opts.operator = args[operatorIdx + 1]
+        const list = draftVault.listSnapshots(opts)
+        if (list.length === 0) {
+          yellow('暂无快照')
+        } else {
+          out(`共有 ${list.length} 个快照:`)
+          list.forEach((s, i) => {
+            out(`  ${i + 1}. [${s.status}] ${s.action} - ${s.draftName || '(未知)'}`)
+            out(`     ID: ${s.id}`)
+            if (s.version) out(`     版本: ${s.version}`)
+            out(`     来源: ${s.source} | 操作者: ${s.operatorName || s.operator}`)
+            out(`     创建: ${s.createdAt}`)
+            if (s.error) out(`     错误: ${s.error}`)
+          })
+        }
+      } else if (sub === 'show') {
+        const id = args[2]
+        if (!id) { err('用法: vault show <snapshotId>'); break }
+        const snap = draftVault.getSnapshot(id)
+        if (!snap) { err(`快照不存在: ${id}`); break }
+        out(`快照详情:`)
+        out(`  ID: ${snap.id}`)
+        out(`  草稿: ${snap.draftName || '(未知)'} (${snap.draftId || '无'})`)
+        out(`  操作: ${snap.action}`)
+        out(`  状态: ${snap.status}`)
+        out(`  版本: ${snap.version || '(无)'}`)
+        out(`  摘要: ${snap.summary || '(无)'}`)
+        out(`  正文提交数: ${snap.body ? snap.body.length : 0}`)
+        out(`  来源: ${snap.source}`)
+        out(`  操作者: ${snap.operatorName || snap.operator}`)
+        out(`  创建时间: ${snap.createdAt}`)
+        if (snap.completedAt) out(`  完成时间: ${snap.completedAt}`)
+        if (snap.error) out(`  错误: ${snap.error}`)
+      } else if (sub === 'commit') {
+        const id = args[2]
+        if (!id) { err('用法: vault commit <snapshotId>'); break }
+        const result = draftVault.commitSnapshot(id)
+        if (result.success) {
+          ok(`快照已提交: ${id}`)
+        } else {
+          err(`提交失败: ${result.errors.join('; ')}`)
+        }
+      } else if (sub === 'recover') {
+        const id = args[2]
+        if (!id) { err('用法: vault recover <snapshotId> [--conflict prefer_body|abort|rename_on_conflict]'); break }
+        const conflictIdx = args.indexOf('--conflict')
+        const conflictResolution = conflictIdx >= 0 && args[conflictIdx + 1] ? args[conflictIdx + 1] : 'prefer_body'
+        const result = draftVault.recoverFromSnapshot(id, { conflictResolution })
+        if (result.success) {
+          ok(`已从快照恢复: ${id}`)
+          if (result.conflict) {
+            yellow(`  恢复过程中检测到冲突 (已按策略 ${conflictResolution} 处理)`)
+          }
+          out(`  可使用 "rn vault undo-recovery" 撤销本次恢复`)
+        } else {
+          err('恢复失败')
+          if (result.errors) result.errors.forEach(e => err(`  ✗ ${e}`))
+          if (result.conflict) {
+            yellow('  检测到冲突，可使用 "rn vault resolve" 解决冲突后重试')
+          }
+        }
+      } else if (sub === 'rollback') {
+        const id = args[2]
+        if (!id) { err('用法: vault rollback <snapshotId>'); break }
+        const result = draftVault.rollbackSnapshot(id)
+        if (result.success) {
+          ok(`已回滚快照: ${id}`)
+          out(`  可使用 "rn vault undo-recovery" 撤销本次回滚`)
+        } else {
+          err(`回滚失败: ${result.errors.join('; ')}`)
+        }
+      } else if (sub === 'archive') {
+        const id = args[2]
+        if (!id) { err('用法: vault archive <snapshotId>'); break }
+        const result = draftVault.archiveSnapshot(id)
+        if (result.success) {
+          ok(`已归档快照: ${id}`)
+        } else {
+          err(`归档失败: ${result.errors.join('; ')}`)
+        }
+      } else if (sub === 'clean') {
+        const result = draftVault.cleanArchivedSnapshots()
+        if (result.success) {
+          ok(`已清理 ${result.removed} 个已归档快照`)
+        }
+      } else if (sub === 'pending') {
+        const list = draftVault.findPendingTxns()
+        if (list.length === 0) {
+          ok('没有未完成的事务')
+        } else {
+          yellow(`发现 ${list.length} 个未完成事务:`)
+          list.forEach((t, i) => {
+            out(`  ${i + 1}. [${t.status}] ${t.action} - ${t.draftId || '(未知)'}`)
+            out(`     快照ID: ${t.snapshotId}`)
+            out(`     创建时间: ${t.createdAt}`)
+            if (t.error) out(`     错误: ${t.error}`)
+          })
+        }
+      } else if (sub === 'recover-pending') {
+        const result = draftVault.recoverPendingTxns()
+        if (result.recovered > 0) {
+          ok(`已恢复 ${result.recovered}/${result.total} 条未完成事务`)
+          result.results.forEach((r, i) => {
+            if (r.success) {
+              out(`  ${i + 1}. ✓ ${r.snapshotId}`)
+            } else {
+              err(`  ${i + 1}. ✗ ${r.snapshotId}: ${r.reason || r.errors?.join('; ') || '未知'}`)
+            }
+          })
+        } else if (result.total === 0) {
+          ok('没有需要恢复的未完成事务')
+        } else {
+          yellow(`恢复完成: 0/${result.total} 条事务成功恢复`)
+          result.results.forEach((r, i) => {
+            err(`  ${i + 1}. ✗ ${r.snapshotId}: ${r.reason || r.errors?.join('; ') || '未知'}`)
+          })
+        }
+      } else if (sub === 'undo-recovery') {
+        const result = draftVault.undoLastRecovery()
+        if (result.success) {
+          ok(`已撤销${result.action === 'recover' ? '恢复' : '回滚'}操作: 快照 ${result.snapshotId}`)
+        } else {
+          err(`撤销失败: ${result.reason}`)
+        }
+      } else if (sub === 'undo-recovery-peek') {
+        const peek = draftVault.peekRecoveryUndo()
+        if (!peek) {
+          yellow('没有可撤销的恢复或回滚操作')
+        } else {
+          out(`可撤销: ${peek.action === 'recover' ? '恢复' : '回滚'}操作`)
+          out(`  快照ID: ${peek.snapshotId}`)
+          out(`  时间: ${peek.timestamp}`)
+        }
+      } else if (sub === 'resolve') {
+        const snapshotId = args[2]
+        const resolution = args[3]
+        if (!snapshotId || !resolution) { err('用法: vault resolve <snapshotId> <resolution> [--new-version ver] [--new-name name] [--admin --reason text]'); break }
+        const opts = {}
+        const nvIdx = args.indexOf('--new-version')
+        const nnIdx = args.indexOf('--new-name')
+        const adminIdx = args.indexOf('--admin')
+        const reasonIdx = args.indexOf('--reason')
+        if (nvIdx >= 0 && args[nvIdx + 1]) opts.newVersion = args[nvIdx + 1]
+        if (nnIdx >= 0 && args[nnIdx + 1]) opts.newName = args[nnIdx + 1]
+        if (adminIdx >= 0) opts.isAdmin = true
+        if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.reason = args[reasonIdx + 1]
+        const result = draftVault.resolveConflict(snapshotId, resolution, opts)
+        if (result.success) {
+          ok('冲突已解决')
+          if (result.resolutionPlan && result.resolutionPlan.actions) {
+            result.resolutionPlan.actions.forEach(a => {
+              out(`  - ${a.type}: ${JSON.stringify(a)}`)
+            })
+          }
+        } else {
+          err('冲突解决失败')
+          if (result.errors) result.errors.forEach(e => err(`  ✗ ${e}`))
+          if (result.availableResolutions) {
+            yellow(`  可用策略: ${result.availableResolutions.join(', ')}`)
+          }
+        }
+      } else if (sub === 'export') {
+        const outputPath = args[2]
+        try {
+          if (outputPath) {
+            const result = draftVault.exportVaultToFile(outputPath)
+            if (result.success) {
+              ok(`保险箱数据已导出: ${result.path}`)
+            } else {
+              err(`导出失败: ${result.errors.join('; ')}`)
+            }
+          } else {
+            const data = draftVault.exportVaultToJson()
+            out(JSON.stringify(data, null, 2))
+          }
+        } catch (e) {
+          err(`导出失败: ${e.message}`)
+        }
+      } else if (sub === 'import') {
+        const target = args[2]
+        if (!target) { err('用法: vault import <file> [--force]'); break }
+        const force = args.indexOf('--force') >= 0
+        const opts = { force }
+        try {
+          const result = draftVault.importVaultFromFile(target, opts)
+          if (result.success) {
+            ok(`已导入: ${result.importedCount} 个快照`)
+            if (result.skipped > 0) yellow(`  跳过: ${result.skipped} 个 (冲突: ${result.conflictCount})`)
+          } else {
+            err(`导入失败: ${result.errors.join('; ')}`)
+          }
+        } catch (e) {
+          err(`导入失败: ${e.message}`)
+        }
+      } else if (sub === 'logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 20
+        try {
+          const logs = draftVault.listLogs(isNaN(n) ? 20 : n)
+          if (logs.length === 0) {
+            yellow('暂无保险箱操作日志')
+          } else {
+            out(`最近 ${logs.length} 条保险箱操作日志:`)
+            logs.forEach((l, i) => {
+              out(`  ${i + 1}. [${l.action}] ${l.timestamp}`)
+              if (l.snapshotId) out(`     快照: ${l.snapshotId}`)
+              if (l.draftAction) out(`     操作: ${l.draftAction}`)
+              if (l.source) out(`     来源: ${l.source}`)
+              if (l.operator) out(`     操作者: ${l.operator}`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
+        }
+      } else {
+        err('未知 vault 子命令。使用: status|snapshots|show|commit|recover|rollback|archive|clean|pending|recover-pending|undo-recovery|undo-recovery-peek|resolve|export|import|logs')
       }
       break
     }
