@@ -12,6 +12,10 @@ const OP_STATUS_COMMITTED = 'committed'
 const OP_STATUS_FAILED = 'failed'
 const OP_STATUS_RECOVERED = 'recovered'
 const OP_STATUS_ROLLED_BACK = 'rolled_back'
+const OP_STATUS_INTERRUPTED = 'interrupted'
+const OP_STATUS_CONFLICT_BRANCH = 'conflict_branch'
+
+let _interruptHooks = new Map()
 
 function _now() {
   return new Date().toISOString()
@@ -34,6 +38,14 @@ function _appendLog(entry) {
     ...entry,
     timestamp: entry.timestamp || _now()
   })
+}
+
+function _appendConflict(entry) {
+  store.appendOperationAuditConflict(entry)
+}
+
+function _appendInterruption(entry) {
+  store.appendOperationAuditInterruption(entry)
 }
 
 function _loadUndo() {
@@ -66,23 +78,94 @@ function _validateContext(context) {
   return errors
 }
 
-function _acquireLock(targetKey, context) {
+function _acquireLock(targetKey, context, extra) {
   const audit = _loadAudit()
   const existing = audit.lockTable[targetKey]
   if (existing) {
     const elapsed = Date.now() - new Date(existing.acquiredAt).getTime()
     if (elapsed < 30 * 60 * 1000) {
+      const conflictInfo = {
+        targetKey,
+        holder: existing.operator,
+        holderName: existing.operatorName,
+        holderEntry: existing.entry,
+        holderSessionId: existing.sessionId,
+        acquiredAt: existing.acquiredAt,
+        challenger: context.userId,
+        challengerName: context.userName || context.userId,
+        challengerEntry: context.entry,
+        challengerSessionId: context.sessionId || null,
+        challengerRequestId: context.requestId || null,
+        detectedAt: _now()
+      }
+      const conflictRecordId = _genAuditId()
+      audit.conflictBranches = audit.conflictBranches || []
+      const branchRecord = {
+        id: 'cf_' + conflictRecordId.substring(4),
+        branchId: 'cf_' + conflictRecordId.substring(4),
+        action: extra && extra.action ? extra.action : 'unknown',
+        targetKey,
+        holderRecordId: existing.recordId || null,
+        challengerContext: {
+          entry: context.entry,
+          userId: context.userId,
+          userName: context.userName || context.userId,
+          sessionId: context.sessionId || null,
+          requestId: context.requestId || null
+        },
+        holderContext: {
+          entry: existing.entry,
+          userId: existing.operator,
+          userName: existing.operatorName,
+          sessionId: existing.sessionId || null,
+          requestId: existing.requestId || null
+        },
+        holder: {
+          userId: existing.operator,
+          userName: existing.operatorName,
+          entry: existing.entry,
+          sessionId: existing.sessionId || null,
+          requestId: existing.requestId || null
+        },
+        challenger: {
+          userId: context.userId,
+          userName: context.userName || context.userId,
+          entry: context.entry,
+          sessionId: context.sessionId || null,
+          requestId: context.requestId || null
+        },
+        status: 'open',
+        detectedAt: conflictInfo.detectedAt,
+        resolvedAt: null,
+        resolution: null
+      }
+      audit.conflictBranches.push(branchRecord)
+      if (audit.conflictBranches.length > 200) {
+        audit.conflictBranches.splice(0, audit.conflictBranches.length - 200)
+      }
+      _saveAudit(audit)
+
+      _appendConflict({
+        ...conflictInfo,
+        branchId: branchRecord.id,
+        action: extra && extra.action ? extra.action : 'unknown'
+      })
+
+      _appendLog({
+        action: 'lock_conflict',
+        targetKey,
+        branchId: branchRecord.id,
+        holder: existing.operator,
+        challenger: context.userId,
+        holderEntry: existing.entry,
+        challengerEntry: context.entry
+      })
+
       return {
         success: false,
         errors: [`对象 ${targetKey} 正在被 ${existing.operator} (${existing.operatorName}) 操作，来源 ${existing.entry}，无法并发执行`],
-        conflict: {
-          targetKey,
-          holder: existing.operator,
-          holderName: existing.operatorName,
-          holderEntry: existing.entry,
-          holderSessionId: existing.sessionId,
-          acquiredAt: existing.acquiredAt
-        }
+        conflict: conflictInfo,
+        conflictBranchId: branchRecord.id
       }
     }
   }
@@ -92,6 +175,7 @@ function _acquireLock(targetKey, context) {
     entry: context.entry,
     sessionId: context.sessionId || null,
     requestId: context.requestId || null,
+    recordId: extra && extra.recordId ? extra.recordId : null,
     acquiredAt: _now()
   }
   _saveAudit(audit)
@@ -117,7 +201,7 @@ function beginOperation(action, targetKey, context, beforeSnapshot) {
     }
   }
 
-  const lockResult = _acquireLock(targetKey, context)
+  const lockResult = _acquireLock(targetKey, context, { action })
   if (!lockResult.success) {
     return lockResult
   }
@@ -139,12 +223,19 @@ function beginOperation(action, targetKey, context, beforeSnapshot) {
     afterSnapshot: null,
     triggeredAt: _now(),
     completedAt: null,
-    error: null
+    error: null,
+    interruptStage: null,
+    recoveredFrom: null
   }
 
   audit.records.push(record)
   if (audit.records.length > 200) {
     audit.records.splice(0, audit.records.length - 200)
+  }
+
+  const lockEntry = audit.lockTable[targetKey]
+  if (lockEntry) {
+    lockEntry.recordId = recordId
   }
 
   const pendingOp = {
@@ -164,6 +255,7 @@ function beginOperation(action, targetKey, context, beforeSnapshot) {
     action: 'begin_operation',
     recordId,
     operationAction: action,
+    actionType: action,
     targetKey,
     entry: context.entry,
     userId: context.userId
@@ -198,7 +290,8 @@ function commitOperation(recordId, afterSnapshot) {
     action: 'commit_operation',
     recordId,
     operationAction: record.action,
-    targetKey: record.targetKey
+    targetKey: record.targetKey,
+    status: OP_STATUS_COMMITTED
   })
 
   return { success: true }
@@ -236,7 +329,7 @@ function failOperation(recordId, error) {
 
 function recoverPendingOperations() {
   const audit = _loadAudit()
-  const pending = audit.pendingOps.filter(p => p.status === OP_STATUS_PENDING)
+  const pending = audit.pendingOps.filter(p => p.status === OP_STATUS_PENDING || p.status === OP_STATUS_INTERRUPTED)
   if (pending.length === 0) {
     return { success: true, recovered: 0, total: 0, results: [] }
   }
@@ -246,7 +339,7 @@ function recoverPendingOperations() {
   const currentCommits = store.loadCommits()
 
   const undoSnapshot = {
-    action: 'auto_recover',
+    action: 'recover',
     timestamp: _now(),
     previousDrafts: JSON.parse(JSON.stringify(currentDrafts)),
     previousCommits: JSON.parse(JSON.stringify(currentCommits)),
@@ -260,20 +353,37 @@ function recoverPendingOperations() {
       const idx = audit.pendingOps.findIndex(p => p.recordId === pendingOp.recordId)
       if (idx >= 0) audit.pendingOps.splice(idx, 1)
       results.push({ recordId: pendingOp.recordId, success: false, reason: '审计记录已丢失' })
+      _appendInterruption({
+        recordId: pendingOp.recordId,
+        reason: 'audit_record_lost',
+        stage: 'recover_pending',
+        type: 'recovery_failed'
+      })
       return
     }
 
+    if (!record.completedAt) {
+      record.interruptStage = record.interruptStage || 'between_begin_and_commit'
+    }
+
     if (record.beforeSnapshot) {
+      let restoreSuccess = false
       if (record.action === ACTION_APPLY && record.beforeSnapshot.commits) {
         store.saveCommits(JSON.parse(JSON.stringify(record.beforeSnapshot.commits)))
+        if (record.beforeSnapshot.drafts) {
+          store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
+        }
         record.status = OP_STATUS_RECOVERED
         record.completedAt = _now()
+        record.recoveredFrom = 'interrupted_apply'
+        record.recoveryType = 'restored_before_snapshot'
         const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
         if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
         delete audit.lockTable[record.targetKey]
         recovered++
         undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action })
+        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
+        restoreSuccess = true
       } else if (record.action === ACTION_ARCHIVE && record.beforeSnapshot.drafts) {
         store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
         if (record.beforeSnapshot.commits) {
@@ -281,30 +391,55 @@ function recoverPendingOperations() {
         }
         record.status = OP_STATUS_RECOVERED
         record.completedAt = _now()
+        record.recoveredFrom = 'interrupted_archive'
+        record.recoveryType = 'restored_before_snapshot'
         const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
         if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
         delete audit.lockTable[record.targetKey]
         recovered++
         undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action })
+        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
+        restoreSuccess = true
       } else if (record.action === ACTION_IMPORT && record.beforeSnapshot.drafts) {
         store.saveDrafts(JSON.parse(JSON.stringify(record.beforeSnapshot.drafts)))
         record.status = OP_STATUS_RECOVERED
         record.completedAt = _now()
+        record.recoveredFrom = 'interrupted_import'
+        record.recoveryType = 'restored_before_snapshot'
         const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
         if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
         delete audit.lockTable[record.targetKey]
         recovered++
         undoSnapshot.recoveredRecordIds.push(record.id)
-        results.push({ recordId: record.id, success: true, action: record.action })
+        results.push({ recordId: record.id, success: true, action: record.action, recoveryType: 'restored_before_snapshot' })
+        restoreSuccess = true
+      }
+
+      if (restoreSuccess) {
+        _appendInterruption({
+          recordId: record.id,
+          action: record.action,
+          stage: record.interruptStage,
+          type: 'recovered',
+          recovered: true,
+          recoveryType: 'restored_before_snapshot'
+        })
       } else {
         record.status = OP_STATUS_FAILED
-        record.error = '无法自动恢复: 缺少 beforeSnapshot 数据'
+        record.error = '无法自动恢复: beforeSnapshot 不包含可恢复的数据类型'
         record.completedAt = _now()
         const pIdx = audit.pendingOps.findIndex(p => p.recordId === record.id)
         if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
         delete audit.lockTable[record.targetKey]
-        results.push({ recordId: record.id, success: false, reason: '无法自动恢复' })
+        results.push({ recordId: record.id, success: false, reason: '无法自动恢复: 缺少 beforeSnapshot 数据' })
+        _appendInterruption({
+          recordId: record.id,
+          action: record.action,
+          stage: record.interruptStage,
+          type: 'recovery_failed',
+          recovered: false,
+          reason: 'missing_recoverable_snapshot'
+        })
       }
     } else {
       record.status = OP_STATUS_FAILED
@@ -314,6 +449,14 @@ function recoverPendingOperations() {
       if (pIdx >= 0) audit.pendingOps.splice(pIdx, 1)
       delete audit.lockTable[record.targetKey]
       results.push({ recordId: record.id, success: false, reason: 'beforeSnapshot 为空' })
+      _appendInterruption({
+        recordId: record.id,
+        action: record.action,
+        stage: record.interruptStage,
+        type: 'recovery_failed',
+        recovered: false,
+        reason: 'before_snapshot_empty'
+      })
     }
   })
 
@@ -324,12 +467,107 @@ function recoverPendingOperations() {
   }
 
   _appendLog({
-    action: 'auto_recover',
+    action: 'recover',
     pendingCount: pending.length,
     recoveredCount: recovered
   })
 
   return { success: true, recovered, total: pending.length, results }
+}
+
+function setInterruptHook(recordId, stage, fn) {
+  const key = `${recordId}:${stage}`
+  _interruptHooks.set(key, fn)
+}
+
+function clearInterruptHooks() {
+  _interruptHooks.clear()
+}
+
+function _triggerInterrupt(recordId, stage) {
+  const key = `${recordId}:${stage}`
+  const autoKey = `AUTO_MAP:${stage}`
+  const hook = _interruptHooks.get(key) || _interruptHooks.get(autoKey)
+  if (hook) {
+    _appendInterruption({
+      recordId,
+      stage,
+      type: 'interrupted',
+      triggered: true
+    })
+    const audit = _loadAudit()
+    const record = audit.records.find(r => r.id === recordId)
+    if (record) {
+      record.interruptStage = stage
+      record.status = OP_STATUS_INTERRUPTED
+    }
+    const pendingIdx = audit.pendingOps.findIndex(p => p.recordId === recordId)
+    if (pendingIdx >= 0) {
+      audit.pendingOps[pendingIdx].status = OP_STATUS_INTERRUPTED
+    }
+    _saveAudit(audit)
+    try {
+      hook({ recordId, stage })
+    } finally {
+      _interruptHooks.delete(key)
+      _interruptHooks.delete(autoKey)
+    }
+    return true
+  }
+  return false
+}
+
+function listConflictBranches(options) {
+  options = options || {}
+  const audit = _loadAudit()
+  let list = (audit.conflictBranches || []).slice()
+  if (options.targetKey) list = list.filter(b => b.targetKey === options.targetKey)
+  if (options.action) list = list.filter(b => b.action === options.action)
+  if (options.status) list = list.filter(b => b.status === options.status)
+  if (options.holderUserId) list = list.filter(b => b.holderContext.userId === options.holderUserId)
+  if (options.challengerUserId) list = list.filter(b => b.challengerContext.userId === options.challengerUserId)
+  list.sort((a, b) => new Date(b.detectedAt) - new Date(a.detectedAt))
+  return list
+}
+
+function getConflictBranch(branchId) {
+  const audit = _loadAudit()
+  return (audit.conflictBranches || []).find(b => b.id === branchId || b.branchId === branchId) || null
+}
+
+function resolveConflictBranch(branchId, resolution, resolverContext) {
+  const audit = _loadAudit()
+  const branch = (audit.conflictBranches || []).find(b => b.id === branchId || b.branchId === branchId)
+  if (!branch) {
+    return { success: false, errors: ['冲突分支记录不存在'] }
+  }
+  branch.status = 'resolved'
+  branch.resolvedAt = _now()
+  branch.resolution = resolution
+  branch.resolver = {
+    userId: resolverContext ? resolverContext.userId : null,
+    userName: resolverContext ? (resolverContext.userName || resolverContext.userId) : 'system',
+    entry: resolverContext ? resolverContext.entry : null
+  }
+  _saveAudit(audit)
+  _appendLog({
+    action: 'conflict_resolved',
+    branchId,
+    resolution,
+    resolver: resolverContext ? resolverContext.userId : 'system'
+  })
+  return { success: true, branchId }
+}
+
+function listInterruptions(limit) {
+  const list = store.loadOperationAuditInterruptions()
+  const n = limit || 50
+  return list.slice(-n).reverse()
+}
+
+function clearInterruptions() {
+  store.clearOperationAuditInterruptions()
+  return { success: true }
 }
 
 function rollbackOperation(recordId, context) {
@@ -392,19 +630,23 @@ function undoLastRecoveryOrRollback() {
   store.saveDrafts(JSON.parse(JSON.stringify(undoSnap.previousDrafts)))
   store.saveCommits(JSON.parse(JSON.stringify(undoSnap.previousCommits)))
 
+  const undone = undoSnap.recoveredRecordIds ? undoSnap.recoveredRecordIds.length : 1
+
   _clearUndo()
 
   _appendLog({
     action: 'undo_recovery_or_rollback',
     originalAction: undoSnap.action,
-    recordId: undoSnap.recordId || null
+    recordId: undoSnap.recordId || null,
+    undone
   })
 
   return {
     success: true,
     action: undoSnap.action,
     recordId: undoSnap.recordId || null,
-    timestamp: undoSnap.timestamp
+    timestamp: undoSnap.timestamp,
+    undone
   }
 }
 
@@ -629,12 +871,20 @@ function orchestrateApply(draftId, context, applyFn) {
 
   const recordId = beginResult.recordId
 
+  if (_triggerInterrupt(recordId, 'before_apply_fn')) {
+    return { success: false, errors: ['操作被中断 (before_apply_fn)'], interrupted: true, interruptStage: 'before_apply_fn', _auditRecordId: recordId }
+  }
+
   try {
     const result = applyFn()
 
     if (result && result.success === false) {
       failOperation(recordId, (result.errors || ['operation failed']).join('; '))
       return result
+    }
+
+    if (_triggerInterrupt(recordId, 'after_apply_fn_before_commit')) {
+      return { success: false, errors: ['操作被中断 (after_apply_fn_before_commit)'], interrupted: true, interruptStage: 'after_apply_fn_before_commit', _auditRecordId: recordId }
     }
 
     const afterCommits = store.loadCommits()
@@ -685,12 +935,20 @@ function orchestrateArchive(draftId, context, archiveFn) {
 
   const recordId = beginResult.recordId
 
+  if (_triggerInterrupt(recordId, 'before_archive_fn')) {
+    return { success: false, errors: ['操作被中断 (before_archive_fn)'], interrupted: true, interruptStage: 'before_archive_fn', _auditRecordId: recordId }
+  }
+
   try {
     const result = archiveFn()
 
     if (result && result.success === false) {
       failOperation(recordId, (result.errors || ['operation failed']).join('; '))
       return result
+    }
+
+    if (_triggerInterrupt(recordId, 'after_archive_fn_before_commit')) {
+      return { success: false, errors: ['操作被中断 (after_archive_fn_before_commit)'], interrupted: true, interruptStage: 'after_archive_fn_before_commit', _auditRecordId: recordId }
     }
 
     const afterDrafts = store.loadDrafts()
@@ -737,12 +995,20 @@ function orchestrateImport(context, importFn, beforeSnapshot) {
 
   const recordId = beginResult.recordId
 
+  if (_triggerInterrupt(recordId, 'before_import_fn')) {
+    return { success: false, errors: ['操作被中断 (before_import_fn)'], interrupted: true, interruptStage: 'before_import_fn', _auditRecordId: recordId }
+  }
+
   try {
     const result = importFn()
 
     if (result && result.success === false) {
       failOperation(recordId, (result.errors || ['operation failed']).join('; '))
       return result
+    }
+
+    if (_triggerInterrupt(recordId, 'after_import_fn_before_commit')) {
+      return { success: false, errors: ['操作被中断 (after_import_fn_before_commit)'], interrupted: true, interruptStage: 'after_import_fn_before_commit', _auditRecordId: recordId }
     }
 
     const afterDrafts = store.loadDrafts()
@@ -772,6 +1038,8 @@ module.exports = {
   OP_STATUS_FAILED,
   OP_STATUS_RECOVERED,
   OP_STATUS_ROLLED_BACK,
+  OP_STATUS_INTERRUPTED,
+  OP_STATUS_CONFLICT_BRANCH,
   beginOperation,
   commitOperation,
   failOperation,
@@ -792,5 +1060,12 @@ module.exports = {
   listLogs,
   orchestrateApply,
   orchestrateArchive,
-  orchestrateImport
+  orchestrateImport,
+  setInterruptHook,
+  clearInterruptHooks,
+  listConflictBranches,
+  getConflictBranch,
+  resolveConflictBranch,
+  listInterruptions,
+  clearInterruptions
 }

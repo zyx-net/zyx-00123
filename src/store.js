@@ -406,6 +406,62 @@ function clearOperationAuditUndo() {
   }
 }
 
+function loadOperationAuditConflicts() {
+  return load('operation_audit_conflicts') || []
+}
+
+function saveOperationAuditConflicts(conflicts) {
+  save('operation_audit_conflicts', conflicts)
+}
+
+function appendOperationAuditConflict(entry) {
+  const conflicts = loadOperationAuditConflicts()
+  conflicts.push({
+    ...entry,
+    recordedAt: entry.recordedAt || new Date().toISOString()
+  })
+  if (conflicts.length > 200) {
+    conflicts.splice(0, conflicts.length - 200)
+  }
+  saveOperationAuditConflicts(conflicts)
+  return conflicts
+}
+
+function clearOperationAuditConflicts() {
+  const fp = filePath('operation_audit_conflicts')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
+function loadOperationAuditInterruptions() {
+  return load('operation_audit_interruptions') || []
+}
+
+function saveOperationAuditInterruptions(interruptions) {
+  save('operation_audit_interruptions', interruptions)
+}
+
+function appendOperationAuditInterruption(entry) {
+  const list = loadOperationAuditInterruptions()
+  list.push({
+    ...entry,
+    recordedAt: entry.recordedAt || new Date().toISOString()
+  })
+  if (list.length > 100) {
+    list.splice(0, list.length - 100)
+  }
+  saveOperationAuditInterruptions(list)
+  return list
+}
+
+function clearOperationAuditInterruptions() {
+  const fp = filePath('operation_audit_interruptions')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -470,6 +526,14 @@ module.exports = {
   loadOperationAuditUndo,
   saveOperationAuditUndo,
   clearOperationAuditUndo,
+  loadOperationAuditConflicts,
+  saveOperationAuditConflicts,
+  appendOperationAuditConflict,
+  clearOperationAuditConflicts,
+  loadOperationAuditInterruptions,
+  saveOperationAuditInterruptions,
+  appendOperationAuditInterruption,
+  clearOperationAuditInterruptions,
   DATA_DIR,
   BACKUPS_DIR
 }

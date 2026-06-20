@@ -1248,7 +1248,7 @@ function run() {
         }
       } else if (sub === 'apply') {
         const ident = args[2]
-        if (!ident) { err('用法: draft apply <name|id> [--user <name>]'); break }
+        if (!ident) { err('用法: draft apply <name|id> --user <name>'); break }
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
@@ -1258,14 +1258,18 @@ function run() {
             opts.userId = args[userIdx + 1]
             opts.userName = args[userIdx + 1]
           }
-          if (opts.userId) {
-            opts._auditContext = {
-              entry: operationAudit.ENTRY_CLI,
-              userId: opts.userId,
-              userName: opts.userName || opts.userId,
-              sessionId: process.env.SESSION_ID || null,
-              requestId: null
-            }
+          if (!opts.userId) {
+            err('强制审计拦截: draft apply 必须通过 --user 指定操作者身份，不允许匿名操作')
+            yellow('提示: rn draft apply <name|id> --user <用户名>')
+            process.exitCode = 2
+            break
+          }
+          opts._auditContext = {
+            entry: operationAudit.ENTRY_CLI,
+            userId: opts.userId,
+            userName: opts.userName || opts.userId,
+            sessionId: process.env.SESSION_ID || null,
+            requestId: null
           }
           const result = draft.applyDraft(resolved.id, opts)
           printResultLogs(result)
@@ -1273,16 +1277,36 @@ function run() {
             ok(`已应用草稿: ${result.draft.name}`)
             out(`  之前提交数: ${result.previousCommitCount}`)
             out(`  应用后提交数: ${result.appliedCommitCount}`)
-            if (result._auditRecordId) out(`  审计记录: ${result._auditRecordId}`)
+            if (result._auditRecordId) {
+              out(`  审计记录ID: ${result._auditRecordId}`)
+              out(`  审计入口: ${result._auditEntry}`)
+              out(`  操作者: ${result._auditUserId}`)
+              out(`  触发时间: ${result._auditTriggeredAt}`)
+            }
           } else {
             err('应用失败')
+            if (result.blocked && result.reason === 'invalid_audit_context') {
+              yellow('审计上下文校验失败，操作被强制拦截')
+            }
+            if (result.conflictBranchId) {
+              yellow(`检测到并发冲突，冲突分支ID: ${result.conflictBranchId}`)
+              if (result.conflict) {
+                yellow(`  被占用者: ${result.conflict.holder} (${result.conflict.holderName})`)
+                yellow(`  占用来源: ${result.conflict.holderEntry}`)
+                yellow(`  占用时间: ${result.conflict.acquiredAt}`)
+              }
+            }
+            if (result.interrupted) {
+              yellow(`操作在阶段 ${result.interruptStage} 被中断，可通过恢复流程处理`)
+            }
+            process.exitCode = 1
           }
         } catch (e) {
           err(`应用失败: ${e.message}`)
         }
       } else if (sub === 'archive') {
         const ident = args[2]
-        if (!ident) { err('用法: draft archive <name|id> [--user <name>]'); break }
+        if (!ident) { err('用法: draft archive <name|id> --user <name>'); break }
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
@@ -1292,24 +1316,44 @@ function run() {
             opts.userId = args[userIdx + 1]
             opts.userName = args[userIdx + 1]
           }
-          if (opts.userId) {
-            opts._auditContext = {
-              entry: operationAudit.ENTRY_CLI,
-              userId: opts.userId,
-              userName: opts.userName || opts.userId,
-              sessionId: process.env.SESSION_ID || null,
-              requestId: null
-            }
+          if (!opts.userId) {
+            err('强制审计拦截: draft archive 必须通过 --user 指定操作者身份，不允许匿名操作')
+            yellow('提示: rn draft archive <name|id> --user <用户名>')
+            process.exitCode = 2
+            break
           }
+          opts._auditContext = {
+            entry: operationAudit.ENTRY_CLI,
+            userId: opts.userId,
+            userName: opts.userName || opts.userId,
+            sessionId: process.env.SESSION_ID || null,
+            requestId: null
+          }
+          opts._vaultSource = 'cli'
           const result = draft.archiveDraft(resolved.id, opts)
           printResultLogs(result)
           if (result.success) {
             ok(`已从草稿归档: ${result.draft.version}`)
             out(`  提交数: ${result.snapshot.commitCount}`)
             out(`  版本占用已释放`)
-            if (result._auditRecordId) out(`  审计记录: ${result._auditRecordId}`)
+            if (result._auditRecordId) {
+              out(`  审计记录ID: ${result._auditRecordId}`)
+              out(`  审计入口: ${result._auditEntry}`)
+              out(`  操作者: ${result._auditUserId}`)
+              out(`  触发时间: ${result._auditTriggeredAt}`)
+            }
           } else {
             err('归档失败')
+            if (result.blocked && result.reason === 'invalid_audit_context') {
+              yellow('审计上下文校验失败，操作被强制拦截')
+            }
+            if (result.conflictBranchId) {
+              yellow(`检测到并发冲突，冲突分支ID: ${result.conflictBranchId}`)
+            }
+            if (result.interrupted) {
+              yellow(`操作在阶段 ${result.interruptStage} 被中断，可通过恢复流程处理`)
+            }
+            process.exitCode = 1
           }
         } catch (e) {
           err(`归档失败: ${e.message}`)
@@ -1341,7 +1385,7 @@ function run() {
         }
       } else if (sub === 'import') {
         const target = args[2]
-        if (!target) { err('用法: draft import <file|json> [--name customName] [--force] [--admin] [--reason <text>] [--user <name>]'); break }
+        if (!target) { err('用法: draft import <file|json> --user <name> [--name customName] [--force] [--admin] [--reason <text>]'); break }
         try {
           const fs = require('fs')
           const pathMod = require('path')
@@ -1358,14 +1402,18 @@ function run() {
             opts.userName = args[userIdx + 1]
           }
           if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
-          if (opts.userId) {
-            opts._auditContext = {
-              entry: operationAudit.ENTRY_CLI,
-              userId: opts.userId,
-              userName: opts.userName || opts.userId,
-              sessionId: process.env.SESSION_ID || null,
-              requestId: null
-            }
+          if (!opts.userId) {
+            err('强制审计拦截: draft import 必须通过 --user 指定操作者身份，不允许匿名操作')
+            yellow('提示: rn draft import <file|json> --user <用户名> [--force] [--name <名称>]')
+            process.exitCode = 2
+            break
+          }
+          opts._auditContext = {
+            entry: operationAudit.ENTRY_CLI,
+            userId: opts.userId,
+            userName: opts.userName || opts.userId,
+            sessionId: process.env.SESSION_ID || null,
+            requestId: null
           }
           let result
           let isFile = false
@@ -1391,6 +1439,12 @@ function run() {
           if (result.success) {
             ok(`已导入草稿: ${result.draft.name} (${result.draft.id})`)
             if (result.draft.version) out(`  版本: ${result.draft.version}`)
+            if (result._auditRecordId) {
+              out(`  审计记录ID: ${result._auditRecordId}`)
+              out(`  审计入口: ${result._auditEntry}`)
+              out(`  操作者: ${result._auditUserId}`)
+              out(`  触发时间: ${result._auditTriggeredAt}`)
+            }
           } else {
             err('导入失败')
             result.errors.forEach(e => err(`  ✗ ${e}`))
@@ -1399,6 +1453,15 @@ function run() {
             }
             if (result.blocked && result.reason === 'version_occupied') {
               yellow('提示: 版本已被占用。可使用 --name 修改草稿名或修改版本号，或使用 --admin --force --reason "<理由>" 以管理员身份强制接管')
+            }
+            if (result.blocked && result.reason === 'invalid_audit_context') {
+              yellow('审计上下文校验失败，操作被强制拦截')
+            }
+            if (result.conflictBranchId) {
+              yellow(`检测到并发冲突，冲突分支ID: ${result.conflictBranchId}`)
+            }
+            if (result.interrupted) {
+              yellow(`操作在阶段 ${result.interruptStage} 被中断，可通过恢复流程处理`)
             }
           }
         } catch (e) {

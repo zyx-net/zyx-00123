@@ -505,6 +505,331 @@ async function runWebTests() {
     assert(record.sessionId === 'body-sess-002', 'sessionId 应来自 body')
   })
 
+  console.log('\n--- 11. Web 中断点与恢复测试 ---')
+
+  await runTest('Web apply 中断 before_apply_fn 后通过 recover-pending 恢复', async () => {
+    cleanTestData()
+    setupTestCommits()
+    operationAudit.clearInterruptHooks()
+
+    const createResult = draft.createDraft({
+      name: 'Web中断恢复草稿1',
+      version: 'vw11.0.0',
+      userId: 'webInterruptUser',
+      userName: 'Web中断用户'
+    })
+    assert(createResult.success)
+
+    const draftsBefore = store.loadDrafts()
+    const commitsBefore = store.loadCommits()
+
+    operationAudit.setInterruptHook('AUTO_MAP', 'before_apply_fn', () => {})
+
+    const res = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/apply`, {
+      userId: 'webInterruptUser',
+      userName: 'Web中断用户',
+      sessionId: 'web-sess-int-01',
+      requestId: 'web-req-int-01'
+    })
+
+    assert(res.status === 500 || res.body.interrupted, `应返回中断状态，实际status: ${res.status}`)
+    assert(res.body.interrupted || res.body._auditRecordId, '应标记为中断或包含记录ID')
+
+    const recoverRes = await httpRequestAsync('POST', '/api/audit/recover-pending', {})
+    assert(recoverRes.status === 200, '恢复接口应返回200')
+    assert(recoverRes.body.success, '恢复应成功')
+    assert(recoverRes.body.recovered >= 0, '恢复结果应有计数')
+
+    const recordId = res.body._auditRecordId
+    if (recordId) {
+      const recoveredRecord = operationAudit.getRecord(recordId)
+      assert(recoveredRecord.status === operationAudit.OP_STATUS_RECOVERED, `状态应为 recovered，实际为 ${recoveredRecord.status}`)
+    }
+
+    const draftsAfter = store.loadDrafts()
+    const commitsAfter = store.loadCommits()
+    assert(JSON.stringify(draftsAfter) === JSON.stringify(draftsBefore), '恢复后 drafts 应一致')
+    assert(JSON.stringify(commitsAfter) === JSON.stringify(commitsBefore), '恢复后 commits 应一致')
+
+    operationAudit.clearInterruptHooks()
+  })
+
+  await runTest('Web archive 中断后可恢复，并可通过 audit/undo 撤销恢复', async () => {
+    cleanTestData()
+    setupTestCommits()
+    operationAudit.clearInterruptHooks()
+
+    const createResult = draft.createDraft({
+      name: 'Web中断归档草稿',
+      version: 'vw11.1.0',
+      userId: 'webArcIntUser',
+      userName: '归档中断用户'
+    })
+    assert(createResult.success)
+    const draftsBefore = store.loadDrafts()
+
+    operationAudit.setInterruptHook('AUTO_MAP', 'before_archive_fn', () => {})
+
+    const archiveRes = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/archive`, {
+      userId: 'webArcIntUser',
+      userName: '归档中断用户',
+      sessionId: 'web-sess-arc-int'
+    })
+    assert(archiveRes.status === 500 || archiveRes.body.interrupted)
+
+    const recoverRes = await httpRequestAsync('POST', '/api/audit/recover-pending', {})
+    assert(recoverRes.body.success)
+
+    const undoRes = await httpRequestAsync('POST', '/api/audit/undo', {})
+    assert(undoRes.status === 200)
+    assert(undoRes.body.success, '撤销应成功')
+    assert(undoRes.body.undone > 0, '应撤销至少1条')
+
+    operationAudit.clearInterruptHooks()
+  })
+
+  console.log('\n--- 12. Web 模拟进程重启恢复测试 ---')
+
+  await runTest('Web 通过 recover-pending 模拟重启并补齐 interrupted 状态', async () => {
+    cleanTestData()
+    setupTestCommits()
+    operationAudit.clearInterruptHooks()
+
+    const createResult = draft.createDraft({
+      name: 'Web重启恢复草稿',
+      version: 'vw12.0.0',
+      userId: 'webRestartUser',
+      userName: 'Web重启用户'
+    })
+    assert(createResult.success)
+
+    operationAudit.setInterruptHook('AUTO_MAP', 'before_apply_fn', () => {})
+
+    const applyRes = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/apply`, {
+      userId: 'webRestartUser',
+      userName: 'Web重启用户',
+      sessionId: 'web-sess-restart-01'
+    })
+    assert(applyRes.status === 500 || applyRes.body.interrupted)
+    operationAudit.clearInterruptHooks()
+
+    const recordId = applyRes.body._auditRecordId
+    assert(recordId, '应有 _auditRecordId')
+
+    const rawAudit = store.loadOperationAudit()
+    const pendingOps = rawAudit.pendingOps.filter(p => p.recordId === recordId)
+    assert(pendingOps.length > 0, 'pendingOps 中应有该记录')
+
+    const recoverRes = await httpRequestAsync('POST', '/api/audit/recover-pending', {})
+    assert(recoverRes.status === 200)
+    assert(recoverRes.body.success)
+    assert(recoverRes.body.recovered >= 1, '至少恢复1条')
+
+    const finalRecord = operationAudit.getRecord(recordId)
+    assert(finalRecord.status === operationAudit.OP_STATUS_RECOVERED, '最终状态应为 recovered')
+    assert(finalRecord.recoveredFrom.startsWith('interrupted_'), 'recoveredFrom 应为 interrupted_*')
+    assert(finalRecord.recoveryType === 'restored_before_snapshot', 'recoveryType 应为 restored_before_snapshot')
+
+    const records = operationAudit.listRecords()
+    const noPending = records.filter(r => r.status === operationAudit.OP_STATUS_PENDING)
+    assert(noPending.length === 0, `不应有 pending 状态，实际有 ${noPending.length} 条`)
+
+    const interruptions = operationAudit.listInterruptions(50)
+    const matchRecovered = interruptions.find(i => i.recordId === recordId && i.type === 'recovered')
+    assert(matchRecovered, '中断记录表中应存在 recovered 类型条目')
+  })
+
+  console.log('\n--- 13. Web 并发冲突与分支记录测试 ---')
+
+  await runTest('Web 并发 apply 生成冲突分支记录', async () => {
+    cleanTestData()
+    setupTestCommits()
+
+    const createResult = draft.createDraft({
+      name: 'Web并发冲突草稿',
+      version: 'vw13.0.0',
+      userId: 'webHolder',
+      userName: 'Web持有者'
+    })
+    assert(createResult.success)
+
+    const ctxHolder = { entry: 'web', userId: 'webHolder', userName: 'Web持有者', sessionId: 'web-sess-holder', requestId: 'web-req-holder' }
+    const beginHolder = operationAudit.beginOperation(
+      operationAudit.ACTION_APPLY,
+      `draft:${createResult.draft.id}:apply`,
+      ctxHolder,
+      { commits: [], drafts: [] },
+      { action: operationAudit.ACTION_APPLY }
+    )
+    assert(beginHolder.success, '持有者 begin 应成功')
+
+    const challengerRes = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/apply`, {
+      userId: 'webChallenger',
+      userName: 'Web挑战者',
+      sessionId: 'web-sess-challenger',
+      requestId: 'web-req-challenger'
+    })
+
+    assert(challengerRes.status === 409 || challengerRes.body.conflictBranchId, `应返回冲突状态，实际status: ${challengerRes.status}`)
+    assert(challengerRes.body.conflictBranchId, '应有 conflictBranchId')
+    assert(challengerRes.body.conflict, '应有 conflict 信息')
+    assert(challengerRes.body.conflict.holder === 'webHolder', '持有者应为 webHolder')
+    assert(challengerRes.body.conflict.holderEntry === 'web', '持有者来源应为 web')
+
+    const branchList = operationAudit.listConflictBranches()
+    assert(branchList.length > 0, '应有冲突分支记录')
+    const matchBranch = branchList.find(b => b.branchId === challengerRes.body.conflictBranchId)
+    assert(matchBranch, '应能查到对应分支')
+    assert(matchBranch.holder.userId === 'webHolder', '分支里 holder 正确')
+    assert(matchBranch.challenger.userId === 'webChallenger', '分支里 challenger 正确')
+    assert(matchBranch.status === 'open', '初始状态应为 open')
+
+    const logs = operationAudit.listLogs(50)
+    const conflictLog = logs.find(l => l.action === 'lock_conflict' && l.branchId === challengerRes.body.conflictBranchId)
+    assert(conflictLog, 'operation_audit_logs 应有 lock_conflict')
+
+    operationAudit.failOperation(beginHolder.recordId, '测试完成释放锁')
+  })
+
+  await runTest('Web 管理员解决冲突分支并记录', async () => {
+    cleanTestData()
+    setupTestCommits()
+
+    const createResult = draft.createDraft({
+      name: 'Web冲突解决草稿',
+      version: 'vw13.1.0',
+      userId: 'webResHolder',
+      userName: 'Web解决持有者'
+    })
+    assert(createResult.success)
+
+    const ctxHolder = { entry: 'web', userId: 'webResHolder', userName: 'Web解决持有者' }
+    const beginHolder = operationAudit.beginOperation(
+      operationAudit.ACTION_APPLY,
+      `draft:${createResult.draft.id}:apply`,
+      ctxHolder,
+      { commits: [], drafts: [] },
+      { action: operationAudit.ACTION_APPLY }
+    )
+
+    const challengerRes = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/apply`, {
+      userId: 'webResChallenger',
+      userName: 'Web解决挑战者'
+    })
+    assert(challengerRes.body.conflictBranchId, '应生成冲突分支')
+
+    const resolveRes = await httpRequestAsync('POST', `/api/audit/conflicts/${challengerRes.body.conflictBranchId}/resolve`, {
+      resolution: 'retry_allowed',
+      userId: 'webAdmin',
+      userName: 'Web管理员',
+      entry: 'web'
+    })
+    assert(resolveRes.status === 200, `应返回200，实际: ${resolveRes.status}`)
+    assert(resolveRes.body.success, '解决冲突应成功')
+
+    const afterBranch = operationAudit.getConflictBranch(challengerRes.body.conflictBranchId)
+    assert(afterBranch.status === 'resolved', '冲突状态应为 resolved')
+    assert(afterBranch.resolution === 'retry_allowed', '解决方案应记录')
+    assert(afterBranch.resolver.userId === 'webAdmin', '解决者信息正确')
+
+    operationAudit.failOperation(beginHolder.recordId, '释放锁')
+  })
+
+  console.log('\n--- 14. Web 审计一致性三角验证（存储/返回/日志） ---')
+
+  await runTest('Web apply：存储记录、HTTP返回、日志三方一致', async () => {
+    cleanTestData()
+    setupTestCommits()
+
+    const createResult = draft.createDraft({
+      name: 'Web三角验证草稿',
+      version: 'vw14.0.0',
+      userId: 'webTriUser',
+      userName: 'Web三角用户'
+    })
+    assert(createResult.success)
+
+    const applyRes = await httpRequestAsync('POST', `/api/drafts/${createResult.draft.id}/apply`, {
+      userId: 'webTriUser',
+      userName: 'Web三角用户',
+      sessionId: 'web-sess-tri-01',
+      requestId: 'web-req-tri-01'
+    })
+    assert(applyRes.status === 200 && applyRes.body.success, 'apply 应成功')
+
+    const rid = applyRes.body._auditRecordId
+    assert(rid, '返回应含 _auditRecordId')
+    assert(applyRes.body._auditEntry === 'web', '返回 _auditEntry 正确')
+    assert(applyRes.body._auditUserId === 'webTriUser', '返回 _auditUserId 正确')
+    assert(applyRes.body._auditTriggeredAt, '返回触发时间')
+
+    const record = operationAudit.getRecord(rid)
+    assert(record.id === rid, '存储记录ID一致')
+    assert(record.entry === 'web', '存储 entry 一致')
+    assert(record.userId === 'webTriUser', '存储 userId 一致')
+    assert(record.userName === 'Web三角用户', '存储 userName 一致')
+    assert(record.sessionId === 'web-sess-tri-01', '存储 sessionId 一致')
+    assert(record.requestId === 'web-req-tri-01', '存储 requestId 一致')
+    assert(record.triggeredAt === applyRes.body._auditTriggeredAt, '存储 triggeredAt 与返回一致')
+    assert(record.action === operationAudit.ACTION_APPLY, '存储 action 正确')
+    assert(record.status === operationAudit.OP_STATUS_COMMITTED, '存储 status 正确')
+    assert(record.beforeSnapshot && record.afterSnapshot, '存储前后快照存在')
+
+    const logs = operationAudit.listLogs(100)
+    const beginLog = logs.find(l => l.action === 'begin_operation' && l.recordId === rid)
+    assert(beginLog, '日志里应有 begin_operation')
+    assert(beginLog.entry === 'web', 'beginLog entry 一致')
+    assert(beginLog.userId === 'webTriUser', 'beginLog userId 一致')
+    assert(beginLog.targetKey === `draft:${createResult.draft.id}:apply`, 'beginLog targetKey 一致')
+
+    const commitLog = logs.find(l => l.action === 'commit_operation' && l.recordId === rid)
+    assert(commitLog, '日志里应有 commit_operation')
+    assert(commitLog.status === operationAudit.OP_STATUS_COMMITTED, 'commitLog status 正确')
+  })
+
+  await runTest('Web import：三方一致性验证', async () => {
+    cleanTestData()
+    setupTestCommits()
+
+    const importData = {
+      type: 'release-notes-draft',
+      draft: {
+        name: 'Web导入三角验证',
+        version: 'vw14.2.0',
+        description: 'Web导入测试',
+        commits: [{ id: 'web-imp-c1', message: 'feat: Web导入提交', category: 'feature' }]
+      }
+    }
+
+    const importRes = await httpRequestAsync('POST', '/api/drafts/import', {
+      draftData: importData,
+      userId: 'webImpTri',
+      userName: 'Web导入三角用户',
+      sessionId: 'web-sess-imp-tri-01',
+      requestId: 'web-req-imp-tri-01'
+    })
+    assert(importRes.status === 200 && importRes.body.success, 'import 应成功')
+
+    const rid = importRes.body._auditRecordId
+    assert(rid, '返回应含 _auditRecordId')
+    assert(importRes.body._auditEntry === 'web', '_auditEntry 正确')
+    assert(importRes.body._auditUserId === 'webImpTri', '_auditUserId 正确')
+
+    const record = operationAudit.getRecord(rid)
+    assert(record.action === operationAudit.ACTION_IMPORT, '存储 action 正确')
+    assert(record.entry === 'web', '存储 entry 一致')
+    assert(record.userId === 'webImpTri', '存储 userId 一致')
+    assert(record.sessionId === 'web-sess-imp-tri-01', '存储 sessionId 一致')
+    assert(record.status === operationAudit.OP_STATUS_COMMITTED, '存储 status 正确')
+    assert(record.beforeSnapshot && record.afterSnapshot, '前后快照存在')
+
+    const logs = operationAudit.listLogs(100)
+    const beginLog = logs.find(l => l.action === 'begin_operation' && l.recordId === rid)
+    assert(beginLog && beginLog.actionType === operationAudit.ACTION_IMPORT, 'import beginLog 正确')
+    const commitLog = logs.find(l => l.action === 'commit_operation' && l.recordId === rid)
+    assert(commitLog, 'import commitLog 存在')
+  })
+
   await stopTestServer()
 
   console.log('\n=== Web API 回归测试全部通过 ===')

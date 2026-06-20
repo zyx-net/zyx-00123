@@ -612,14 +612,20 @@ async function handleApi(req, res, pathname) {
         userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
         userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
         sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
-        requestId: body.requestId || null
+        requestId: body.requestId || _headerVal(req.headers['x-request-id']) || `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
       }
       if (!auditContext.userId) {
-        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+        return sendJson(res, {
+          success: false,
+          blocked: true,
+          reason: 'invalid_audit_context',
+          errors: ['审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)']
+        }, 403)
       }
       const result = draft.applyDraft(id, { _auditContext: auditContext })
       if (!result.success && result.errors && result.errors.length > 0) {
-        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+        const statusCode = result.blocked ? 409 : (result.interrupted ? 500 : 400)
+        return sendJson(res, result, statusCode)
       }
       return sendJson(res, result)
     } catch (e) {
@@ -636,17 +642,23 @@ async function handleApi(req, res, pathname) {
         userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
         userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
         sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
-        requestId: body.requestId || null
+        requestId: body.requestId || _headerVal(req.headers['x-request-id']) || `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
       }
       if (!auditContext.userId) {
-        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+        return sendJson(res, {
+          success: false,
+          blocked: true,
+          reason: 'invalid_audit_context',
+          errors: ['审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)']
+        }, 403)
       }
       const opts = { _auditContext: auditContext, _vaultSource: 'web' }
       if (body.userId) opts.userId = body.userId
       if (body.userName) opts.userName = body.userName
       const result = draft.archiveDraft(id, opts)
       if (!result.success && result.errors && result.errors.length > 0) {
-        return sendError(res, result.errors.join('; '), 400)
+        const statusCode = result.blocked ? 409 : (result.interrupted ? 500 : 400)
+        return sendJson(res, result, statusCode)
       }
       return sendJson(res, result)
     } catch (e) {
@@ -697,10 +709,15 @@ async function handleApi(req, res, pathname) {
         userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
         userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
         sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
-        requestId: body.requestId || null
+        requestId: body.requestId || _headerVal(req.headers['x-request-id']) || `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
       }
       if (!auditContext.userId) {
-        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+        return sendJson(res, {
+          success: false,
+          blocked: true,
+          reason: 'invalid_audit_context',
+          errors: ['审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)']
+        }, 403)
       }
       let result
       const opts = { force: body.force, _vaultSource: 'web', _auditContext: auditContext }
@@ -715,7 +732,8 @@ async function handleApi(req, res, pathname) {
         return sendError(res, '缺少 path 或 draftData 参数')
       }
       if (!result.success && result.errors && result.errors.length > 0) {
-        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+        const statusCode = result.blocked ? 409 : (result.interrupted ? 500 : 400)
+        return sendJson(res, result, statusCode)
       }
       return sendJson(res, result)
     } catch (e) {
@@ -1340,6 +1358,55 @@ async function handleApi(req, res, pathname) {
     try {
       const logs = operationAudit.listLogs(isNaN(n) ? 50 : n)
       return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/conflicts' && method === 'GET') {
+    try {
+      const branches = operationAudit.listConflictBranches()
+      return sendJson(res, { branches })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/audit/conflicts/') && !url.pathname.endsWith('/resolve') && method === 'GET') {
+    const branchId = url.pathname.substring('/api/audit/conflicts/'.length)
+    try {
+      const branch = operationAudit.getConflictBranch(branchId)
+      if (!branch) return sendError(res, `冲突分支不存在: ${branchId}`, 404)
+      return sendJson(res, { branch })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/audit/conflicts/') && url.pathname.endsWith('/resolve') && method === 'POST') {
+    const branchId = url.pathname.substring('/api/audit/conflicts/'.length, url.pathname.length - '/resolve'.length)
+    const body = await parseBody(req)
+    try {
+      const resolverContext = {
+        userId: body.userId,
+        userName: body.userName,
+        entry: body.entry || 'web',
+        sessionId: body.sessionId,
+        requestId: body.requestId
+      }
+      const result = operationAudit.resolveConflictBranch(branchId, body.resolution, resolverContext)
+      if (!result.success) return sendError(res, result.error || '解决冲突失败', 400)
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/interruptions' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '50', 10)
+    try {
+      const interruptions = operationAudit.listInterruptions(isNaN(n) ? 50 : n)
+      return sendJson(res, { interruptions })
     } catch (e) {
       return sendError(res, e.message)
     }
