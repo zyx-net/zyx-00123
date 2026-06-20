@@ -220,6 +220,47 @@ function clearExportProfileUndo() {
   }
 }
 
+function loadDrafts() {
+  return load('drafts') || []
+}
+
+function saveDrafts(drafts) {
+  save('drafts', drafts)
+}
+
+function loadDraftLogs() {
+  return load('draft_logs') || []
+}
+
+function saveDraftLogs(logs) {
+  save('draft_logs', logs)
+}
+
+function appendDraftLog(entry) {
+  const logs = loadDraftLogs()
+  logs.push(entry)
+  if (logs.length > 100) {
+    logs.splice(0, logs.length - 100)
+  }
+  saveDraftLogs(logs)
+  return logs
+}
+
+function loadDraftUndo() {
+  return load('draft_undo') || null
+}
+
+function saveDraftUndo(snapshot) {
+  save('draft_undo', snapshot)
+}
+
+function clearDraftUndo() {
+  const fp = filePath('draft_undo')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -248,6 +289,14 @@ module.exports = {
   loadExportProfileUndo,
   saveExportProfileUndo,
   clearExportProfileUndo,
+  loadDrafts,
+  saveDrafts,
+  loadDraftLogs,
+  saveDraftLogs,
+  appendDraftLog,
+  loadDraftUndo,
+  saveDraftUndo,
+  clearDraftUndo,
   DATA_DIR,
   BACKUPS_DIR
 }

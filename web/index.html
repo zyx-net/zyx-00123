@@ -13,6 +13,7 @@
       <button class="tab active" data-tab="import">导入</button>
       <button class="tab" data-tab="classify">分类</button>
       <button class="tab" data-tab="review">复核</button>
+      <button class="tab" data-tab="drafts">草稿箱</button>
       <button class="tab" data-tab="archive">归档</button>
       <button class="tab" data-tab="profiles">导出方案</button>
       <button class="tab" data-tab="config">配置</button>
@@ -102,6 +103,57 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
         </div>
         <button onclick="doUndo()" class="danger">撤销上一步</button>
       </div>
+    </section>
+
+    <section id="tab-drafts" class="tab-content">
+      <h2>发布清单草稿箱</h2>
+      <p class="hint" style="margin-bottom:12px">在正式归档前，把当前筛过的提交、版本号、补充说明和导出选项保存为草稿，支持打开、改名、复制、比较差异，再一键确认归档。</p>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">草稿列表</h3>
+          <div>
+            <button onclick="openDraftModal()" class="primary">+ 新建草稿</button>
+            <button onclick="openImportDraftModal()" class="secondary">导入 JSON</button>
+            <button onclick="loadDrafts()" class="secondary">刷新</button>
+          </div>
+        </div>
+        <div id="draftsList" class="drafts-list"></div>
+      </div>
+
+      <div class="card">
+        <h3>草稿操作日志</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <span id="draftUndoInfo" style="color:#666;font-size:13px">检查中...</span>
+          <div>
+            <button onclick="peekDraftUndo()" class="secondary">刷新撤销信息</button>
+            <button onclick="undoDraftChange()" class="danger">撤销最近操作</button>
+          </div>
+        </div>
+        <div id="draftLogsList" style="max-height:200px;overflow-y:auto"></div>
+      </div>
+
+      <div class="card">
+        <h3>保存当前状态</h3>
+        <p class="hint">将当前工作区的提交、版本号和导出选项快速保存为草稿</p>
+        <div class="form-row">
+          <div class="form-group" style="flex:1">
+            <label>草稿名称</label>
+            <input type="text" id="quickDraftName" placeholder="例如: v1.2.0 发布清单初稿">
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>目标版本号</label>
+            <input type="text" id="quickDraftVersion" placeholder="例如: v1.2.0">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>补充说明</label>
+          <input type="text" id="quickDraftDesc" placeholder="可选，草稿的描述信息">
+        </div>
+        <button onclick="quickSaveDraft()">保存为草稿</button>
+      </div>
+
+      <div id="draftsResult" class="result-box hidden"></div>
     </section>
 
     <section id="tab-archive" class="tab-content">
@@ -377,6 +429,85 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
         <button onclick="closeImportProfileModal()" class="secondary">取消</button>
       </div>
       <div id="importProfileResult" class="result-box hidden" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="draftModal" class="modal hidden">
+    <div class="modal-content modal-large">
+      <span class="modal-close" onclick="closeDraftModal()">&times;</span>
+      <h3 id="draftModalTitle">新建草稿</h3>
+      <div class="form-group">
+        <label>草稿名称 <span style="color:#e74c3c">*</span></label>
+        <input type="text" id="draftName" placeholder="例如: v1.2.0 发布清单初稿">
+      </div>
+      <div class="form-group">
+        <label>目标版本号</label>
+        <input type="text" id="draftVersion" placeholder="例如: v1.2.0">
+      </div>
+      <div class="form-group">
+        <label>补充说明</label>
+        <textarea id="draftDescription" rows="3" placeholder="草稿的描述信息"></textarea>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button onclick="saveDraft()" id="draftSaveBtn">保存</button>
+        <button onclick="closeDraftModal()" class="secondary">取消</button>
+      </div>
+      <div id="draftModalResult" class="result-box hidden" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="importDraftModal" class="modal hidden">
+    <div class="modal-content">
+      <span class="modal-close" onclick="closeImportDraftModal()">&times;</span>
+      <h3>导入草稿</h3>
+      <div class="form-group">
+        <label>选择 JSON 文件</label>
+        <input type="file" id="importDraftFile" accept=".json,application/json">
+      </div>
+      <div class="form-group">
+        <label>或粘贴 JSON 内容</label>
+        <textarea id="importDraftJson" rows="6" placeholder='{"schemaVersion":1,"type":"release-notes-draft",...}'></textarea>
+      </div>
+      <div class="form-group">
+        <label>导入后重命名（可选）</label>
+        <input type="text" id="importDraftAsName" placeholder="留空使用原名">
+      </div>
+      <div class="form-group">
+        <label><input type="checkbox" id="importDraftForce"> 同名时覆盖现有草稿</label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button onclick="doImportDraft()">导入</button>
+        <button onclick="doValidateDraftImport()" class="secondary">校验格式</button>
+        <button onclick="closeImportDraftModal()" class="secondary">取消</button>
+      </div>
+      <div id="importDraftResult" class="result-box hidden" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="compareDraftModal" class="modal hidden">
+    <div class="modal-content modal-large">
+      <span class="modal-close" onclick="closeCompareDraftModal()">&times;</span>
+      <h3>草稿差异对比</h3>
+      <div class="form-row">
+        <div class="form-group" style="flex:1">
+          <label>草稿 1</label>
+          <select id="compareDraft1"></select>
+        </div>
+        <div class="form-group" style="flex:1">
+          <label>草稿 2</label>
+          <select id="compareDraft2"></select>
+        </div>
+      </div>
+      <button onclick="doCompareDrafts()" class="secondary">开始对比</button>
+      <div id="compareDraftResult" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="viewDraftModal" class="modal hidden">
+    <div class="modal-content modal-large">
+      <span class="modal-close" onclick="closeViewDraftModal()">&times;</span>
+      <h3 id="viewDraftTitle">草稿详情</h3>
+      <div id="viewDraftBody"></div>
     </div>
   </div>
 

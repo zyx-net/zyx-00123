@@ -649,3 +649,73 @@ button.primary {
 button.primary:hover {
   opacity: 0.9;
 }
+
+.drafts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.profile-info-row {
+  display: flex;
+  margin-bottom: 6px;
+}
+
+.profile-label {
+  color: #6b7280;
+  min-width: 70px;
+}
+
+.profile-value {
+  color: #1f2937;
+  flex: 1;
+}
+
+.profile-meta {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #f3f4f6;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.modal-large {
+  max-width: 600px;
+}
+
+.log-item {
+  padding: 6px 0;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 13px;
+}
+
+.log-item:last-child {
+  border-bottom: none;
+}
+
+.log-action {
+  font-weight: 600;
+  color: #667eea;
+  margin-right: 8px;
+}
+
+.log-name {
+  color: #374151;
+}
+
+.log-time {
+  color: #9ca3af;
+  font-size: 11px;
+  float: right;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+
+@media (max-width: 600px) {
+  .form-row {
+    flex-direction: column;
+  }
+}

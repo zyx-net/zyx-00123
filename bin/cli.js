@@ -12,6 +12,7 @@ const exporter = require('../src/exporter')
 const store = require('../src/store')
 const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
+const draft = require('../src/draft')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -132,6 +133,29 @@ function printHelp() {
     profile logs [n]                     查看最近 n 条方案操作日志 (默认 10)
     profile undo                         撤销最近一次方案变更
     profile undo-peek                    查看可撤销的方案操作
+
+  草稿箱管理:
+    draft list                           列出所有草稿
+    draft show <name|id>                查看草稿详情
+    draft create <name> [options]       创建草稿
+      选项:
+        --version <ver>                目标版本号
+        --desc <description>           补充说明
+        --force                        同名/同版本时覆盖
+    draft update <name|id> [options]    更新草稿
+      选项同 create，另加 --name <newName> 可重命名
+    draft delete <name|id>              删除草稿
+    draft duplicate <name|id> [newName]  复制草稿
+    draft apply <name|id>               应用草稿到工作区
+    draft archive <name|id>             从草稿一键归档
+    draft export <name|id> [outputPath]  导出草稿为 JSON
+    draft import <file|json> [options]  导入草稿 JSON
+      可选: --name <customName>        导入时重命名
+      可选: --force                     同名/同版本时覆盖
+    draft compare <id1|name1> <id2|name2>  比较两个草稿的差异
+    draft logs [n]                      查看最近 n 条草稿操作日志 (默认 10)
+    draft undo                          撤销最近一次草稿操作
+    draft undo-peek                     查看可撤销的草稿操作
 
   其他:
     web [port]                           启动 Web 界面 (默认 3000)
@@ -922,6 +946,360 @@ function run() {
         }
       } else {
         err('未知 profile 子命令。使用: list | show | create | update | delete | default | duplicate | export | import | logs | undo | undo-peek')
+      }
+      break
+    }
+
+    case 'draft': {
+      const sub = args[1]
+      if (!sub) { err('用法: draft list|show|create|update|delete|duplicate|apply|archive|export|import|compare|logs|undo|undo-peek'); break }
+
+      function resolveDraftIdentifier(arg) {
+        const byId = draft.getDraft(arg)
+        if (byId) return { id: byId.id, draft: byId }
+        const byName = draft.getDraftByName(arg)
+        if (byName) return { id: byName.id, draft: byName }
+        return null
+      }
+
+      function printResultLogs(result) {
+        if (result && result.logs) result.logs.forEach(l => out(`  ℹ ${l}`))
+        if (result && result.warnings) result.warnings.forEach(w => yellow(`  ⚠ ${w}`))
+        if (result && result.errors) result.errors.forEach(e => err(`  ✗ ${e}`))
+      }
+
+      function buildDraftFromArgs(argsArr) {
+        const d = {}
+        const vIdx = argsArr.indexOf('--version')
+        const descIdx = argsArr.indexOf('--desc')
+        const nmIdx = argsArr.indexOf('--name')
+        if (vIdx >= 0 && argsArr[vIdx + 1] !== undefined) d.version = argsArr[vIdx + 1]
+        if (descIdx >= 0 && argsArr[descIdx + 1] !== undefined) d.description = argsArr[descIdx + 1]
+        if (nmIdx >= 0 && argsArr[nmIdx + 1]) d.name = argsArr[nmIdx + 1]
+        return d
+      }
+
+      if (sub === 'list') {
+        const list = draft.listDrafts()
+        if (list.length === 0) {
+          yellow('暂无草稿')
+        } else {
+          out(`共有 ${list.length} 个草稿:`)
+          list.forEach((d, i) => {
+            out(`  ${i + 1}. ${d.name}`)
+            out(`     ID: ${d.id}`)
+            out(`     版本: ${d.version || '(未设置)'}`)
+            out(`     提交数: ${d.commitCount}`)
+            out(`     创建: ${d.createdAt} | 更新: ${d.updatedAt}`)
+          })
+        }
+      } else if (sub === 'show') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft show <name|id>'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        const d = resolved.draft
+        out(`草稿: ${d.name}`)
+        out(`  ID: ${d.id}`)
+        out(`  版本号: ${d.version || '(未设置)'}`)
+        out(`  描述: ${d.description || '(无)'}`)
+        out(`  提交数: ${d.commits.length}`)
+        out(`  创建时间: ${d.createdAt}`)
+        out(`  更新时间: ${d.updatedAt}`)
+        if (d.exportOptions) {
+          out(`  导出方案: ${d.exportOptions.profileName || '(默认)'}`)
+        }
+        out(`\n  提交分类统计:`)
+        const cats = {}
+        d.commits.forEach(c => {
+          const cat = c.category || 'other'
+          cats[cat] = (cats[cat] || 0) + 1
+        })
+        Object.keys(cats).forEach(cat => {
+          out(`    ${cat}: ${cats[cat]} 条`)
+        })
+      } else if (sub === 'create') {
+        const name = args[2]
+        if (!name) { err('用法: draft create <name> [options]'); break }
+        try {
+          const input = buildDraftFromArgs(args)
+          input.name = name
+          const force = args.indexOf('--force') >= 0
+          const result = draft.createDraft({ ...input, force })
+          printResultLogs(result)
+          if (result.success) {
+            if (result.overwritten) {
+              yellow(`已覆盖同名草稿: ${result.draft.name} (${result.draft.id})`)
+            } else {
+              ok(`已创建草稿: ${result.draft.name} (${result.draft.id})`)
+            }
+            out(`  提交数: ${result.draft.commits.length}`)
+          } else {
+            err('创建失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名草稿')
+            }
+            if (result.blocked && result.reason === 'duplicate_version') {
+              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            }
+          }
+        } catch (e) {
+          err(`创建失败: ${e.message}`)
+        }
+      } else if (sub === 'update') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft update <name|id> [options]'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const updates = buildDraftFromArgs(args)
+          const force = args.indexOf('--force') >= 0
+          const result = draft.updateDraft(resolved.id, updates, { force })
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已更新草稿: ${result.draft.name} (${result.draft.id})`)
+          } else {
+            err('更新失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名草稿')
+            }
+            if (result.blocked && result.reason === 'duplicate_version') {
+              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            }
+          }
+        } catch (e) {
+          err(`更新失败: ${e.message}`)
+        }
+      } else if (sub === 'delete') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft delete <name|id>'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const result = draft.deleteDraft(resolved.id)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已删除草稿: ${result.deleted.name}`)
+          } else {
+            err('删除失败')
+          }
+        } catch (e) {
+          err(`删除失败: ${e.message}`)
+        }
+      } else if (sub === 'duplicate') {
+        const ident = args[2]
+        const newName = args[3]
+        if (!ident) { err('用法: draft duplicate <name|id> [newName]'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const result = draft.duplicateDraft(resolved.id, newName)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已复制草稿: ${resolved.draft.name} → ${result.draft.name} (${result.draft.id})`)
+          } else {
+            err('复制失败')
+          }
+        } catch (e) {
+          err(`复制失败: ${e.message}`)
+        }
+      } else if (sub === 'apply') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft apply <name|id>'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const result = draft.applyDraft(resolved.id)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已应用草稿: ${result.draft.name}`)
+            out(`  之前提交数: ${result.previousCommitCount}`)
+            out(`  应用后提交数: ${result.appliedCommitCount}`)
+          } else {
+            err('应用失败')
+          }
+        } catch (e) {
+          err(`应用失败: ${e.message}`)
+        }
+      } else if (sub === 'archive') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft archive <name|id>'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const result = draft.archiveDraft(resolved.id)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已从草稿归档: ${result.draft.version}`)
+            out(`  提交数: ${result.snapshot.commitCount}`)
+          } else {
+            err('归档失败')
+          }
+        } catch (e) {
+          err(`归档失败: ${e.message}`)
+        }
+      } else if (sub === 'export') {
+        const ident = args[2]
+        const outputPath = args[3]
+        if (!ident) { err('用法: draft export <name|id> [outputPath]'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          if (outputPath) {
+            const r = draft.exportDraftToFile(resolved.id, outputPath)
+            if (r.success) {
+              ok(`草稿已导出到文件: ${r.path}`)
+            } else {
+              err(`导出失败: ${(r.errors || []).join('; ')}`)
+            }
+          } else {
+            const r = draft.exportDraftToJson(resolved.id)
+            if (r.success) {
+              out(JSON.stringify(r.data, null, 2))
+            } else {
+              err(`导出失败: ${(r.errors || []).join('; ')}`)
+            }
+          }
+        } catch (e) {
+          err(`导出失败: ${e.message}`)
+        }
+      } else if (sub === 'import') {
+        const target = args[2]
+        if (!target) { err('用法: draft import <file|json> [--name customName] [--force]'); break }
+        try {
+          const fs = require('fs')
+          const pathMod = require('path')
+          const nameIdx = args.indexOf('--name')
+          const opts = { force: args.indexOf('--force') >= 0 }
+          if (nameIdx >= 0 && args[nameIdx + 1]) opts.asName = args[nameIdx + 1]
+          let result
+          let isFile = false
+          if (fs.existsSync(target)) {
+            isFile = true
+          } else if (target.includes('/') || target.includes('\\') || target.endsWith('.json')) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            if (fs.existsSync(absPath)) isFile = true
+          }
+          if (isFile) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            result = draft.importDraftFromFile(absPath, opts)
+          } else {
+            try {
+              const data = JSON.parse(target)
+              result = draft.importDraftFromJson(data, opts)
+            } catch (parseErr) {
+              err(`无法解析输入: 既不是文件路径也不是合法 JSON`)
+              break
+            }
+          }
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已导入草稿: ${result.draft.name} (${result.draft.id})`)
+          } else {
+            err('导入失败')
+            if (result.blocked && result.reason === 'duplicate_name') {
+              yellow('提示: 使用 --force 可覆盖同名草稿，或使用 --name 指定新名称')
+            }
+            if (result.blocked && result.reason === 'duplicate_version') {
+              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            }
+          }
+        } catch (e) {
+          err(`导入失败: ${e.message}`)
+        }
+      } else if (sub === 'compare') {
+        const ident1 = args[2]
+        const ident2 = args[3]
+        if (!ident1 || !ident2) { err('用法: draft compare <id1|name1> <id2|name2>'); break }
+        const r1 = resolveDraftIdentifier(ident1)
+        const r2 = resolveDraftIdentifier(ident2)
+        if (!r1) { err(`草稿不存在: ${ident1}`); break }
+        if (!r2) { err(`草稿不存在: ${ident2}`); break }
+        try {
+          const result = draft.compareDrafts(r1.id, r2.id)
+          if (!result.success) {
+            err('对比失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+            break
+          }
+          const diff = result.diff
+          out(`对比: ${r1.draft.name} vs ${r2.draft.name}`)
+          out('')
+          out(`  名称: ${diff.name.same ? '[一致]' : '[差异]'} ${diff.name.value1} → ${diff.name.value2}`)
+          out(`  版本: ${diff.version.same ? '[一致]' : '[差异]'} ${diff.version.value1 || '(空)'} → ${diff.version.value2 || '(空)'}`)
+          out(`  描述: ${diff.description.same ? '[一致]' : '[差异]'}`)
+          out(`  提交数: ${diff.commitCount.same ? '[一致]' : '[差异]'} ${diff.commitCount.value1} → ${diff.commitCount.value2}`)
+          out('')
+          const c = diff.commits
+          if (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0) {
+            ok('  提交内容完全一致')
+          } else {
+            if (c.added.length > 0) {
+              yellow(`  新增提交 (${c.added.length}):`)
+              c.added.forEach(cm => out(`    + ${cm.id.substring(0, 8)} ${cm.message}`))
+            }
+            if (c.removed.length > 0) {
+              yellow(`  移除提交 (${c.removed.length}):`)
+              c.removed.forEach(cm => out(`    - ${cm.id.substring(0, 8)} ${cm.message}`))
+            }
+            if (c.modified.length > 0) {
+              yellow(`  修改提交 (${c.modified.length}):`)
+              c.modified.forEach(cm => {
+                out(`    ~ ${cm.id.substring(0, 8)}:`)
+                cm.changes.forEach(ch => {
+                  out(`       ${ch.field}: ${JSON.stringify(ch.value1)} → ${JSON.stringify(ch.value2)}`)
+                })
+              })
+            }
+          }
+        } catch (e) {
+          err(`对比失败: ${e.message}`)
+        }
+      } else if (sub === 'logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 10
+        try {
+          const logs = draft.listLogs(isNaN(n) ? 10 : n)
+          if (logs.length === 0) {
+            yellow('暂无草稿操作日志')
+          } else {
+            out(`最近 ${logs.length} 条草稿操作日志:`)
+            const actionLabels = {
+              create: '创建', update: '更新', delete: '删除',
+              duplicate: '复制', apply: '应用', archive: '归档',
+              undo: '撤销', import: '导入', export: '导出'
+            }
+            logs.forEach((l, i) => {
+              const lbl = actionLabels[l.action] || l.action
+              out(`  ${i + 1}. [${lbl}] ${l.timestamp}`)
+              if (l.draftName) out(`     草稿: ${l.draftName} (${l.draftId})`)
+              if (l.description) out(`     描述: ${l.description}`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
+        }
+      } else if (sub === 'undo') {
+        try {
+          const result = draft.undoLastChange()
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已撤销: ${result.description} (操作时间: ${result.timestamp})`)
+          } else {
+            err(`撤销失败: ${result.reason || '未知错误'}`)
+          }
+        } catch (e) {
+          err(`撤销失败: ${e.message}`)
+        }
+      } else if (sub === 'undo-peek') {
+        const peek = draft.peekUndo()
+        if (!peek || !peek.description) {
+          yellow('没有可撤销的草稿操作')
+        } else {
+          out(`可撤销: ${peek.description} (${peek.timestamp})`)
+        }
+      } else {
+        err('未知 draft 子命令。使用: list | show | create | update | delete | duplicate | apply | archive | export | import | compare | logs | undo | undo-peek')
       }
       break
     }

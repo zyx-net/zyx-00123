@@ -65,6 +65,11 @@ document.querySelectorAll('.tab').forEach(btn => {
       loadQuickExportVersions()
       loadQuickExportProfiles()
     }
+    if (btn.dataset.tab === 'drafts') {
+      loadDrafts()
+      loadDraftLogs()
+      peekDraftUndo()
+    }
   })
 })
 
@@ -1362,6 +1367,464 @@ async function quickExportToFile() {
     showResult('quickExportResult', '已导出到文件: ' + result.path, 'success')
   } catch (e) {
     showResult('quickExportResult', '导出失败: ' + e.message, 'error')
+  }
+}
+
+let draftsCache = []
+let currentEditingDraftId = null
+
+async function loadDrafts() {
+  try {
+    const result = await api('/api/drafts', 'GET')
+    draftsCache = result.drafts || []
+    const el = document.getElementById('draftsList')
+    if (draftsCache.length === 0) {
+      el.innerHTML = '<p style="color:#999;text-align:center;padding:20px">暂无草稿，点击"新建草稿"或"保存当前状态"创建第一个</p>'
+      return
+    }
+    el.innerHTML = draftsCache.map(d => renderDraftCard(d)).join('')
+  } catch (e) {
+    document.getElementById('draftsList').innerHTML = '<p style="color:#e74c3c">加载失败: ' + escHtml(e.message) + '</p>'
+  }
+}
+
+function renderDraftCard(d) {
+  return `
+    <div class="profile-card">
+      <div class="profile-header">
+        <div>
+          <strong class="profile-name">${escHtml(d.name)}</strong>
+          ${d.version ? '<span class="profile-badge">' + escHtml(d.version) + '</span>' : ''}
+        </div>
+        <div class="profile-actions">
+          <button onclick="viewDraft('${d.id}')" class="secondary small">查看</button>
+          <button onclick="applyDraft('${d.id}')" class="secondary small">应用</button>
+          <button onclick="editDraft('${d.id}')" class="secondary small">编辑</button>
+          <button onclick="duplicateDraft('${d.id}')" class="secondary small">复制</button>
+          <button onclick="exportDraftJson('${d.id}')" class="secondary small">导出</button>
+          <button onclick="archiveFromDraft('${d.id}')" class="primary small">归档</button>
+          <button onclick="deleteDraft('${d.id}')" class="danger small">删除</button>
+        </div>
+      </div>
+      <div class="profile-body">
+        <div class="profile-info-row">
+          <span class="profile-label">版本号:</span>
+          <span class="profile-value">${escHtml(d.version) || '(未设置)'}</span>
+        </div>
+        <div class="profile-info-row">
+          <span class="profile-label">提交数:</span>
+          <span class="profile-value">${d.commitCount} 条</span>
+        </div>
+        <div class="profile-info-row">
+          <span class="profile-label">描述:</span>
+          <span class="profile-value">${escHtml(d.description) || '(无)'}</span>
+        </div>
+        ${d.profileName ? '<div class="profile-info-row"><span class="profile-label">导出方案:</span><span class="profile-value">' + escHtml(d.profileName) + '</span></div>' : ''}
+        <div class="profile-meta">
+          创建: ${escHtml(d.createdAt || '')} | 更新: ${escHtml(d.updatedAt || '')}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function openDraftModal(draftId) {
+  currentEditingDraftId = draftId || null
+  const modal = document.getElementById('draftModal')
+  const titleEl = document.getElementById('draftModalTitle')
+  const resultEl = document.getElementById('draftModalResult')
+  resultEl.classList.add('hidden')
+
+  if (draftId) {
+    titleEl.textContent = '编辑草稿'
+    const draft = draftsCache.find(d => d.id === draftId)
+    if (draft) {
+      document.getElementById('draftName').value = draft.name
+      document.getElementById('draftVersion').value = draft.version || ''
+      document.getElementById('draftDescription').value = draft.description || ''
+    }
+  } else {
+    titleEl.textContent = '新建草稿'
+    document.getElementById('draftName').value = ''
+    document.getElementById('draftVersion').value = ''
+    document.getElementById('draftDescription').value = ''
+  }
+
+  modal.classList.remove('hidden')
+  document.getElementById('draftName').focus()
+}
+
+function closeDraftModal() {
+  document.getElementById('draftModal').classList.add('hidden')
+  currentEditingDraftId = null
+}
+
+function editDraft(id) {
+  openDraftModal(id)
+}
+
+async function saveDraft() {
+  const name = document.getElementById('draftName').value.trim()
+  const resultEl = document.getElementById('draftModalResult')
+
+  if (!name) {
+    showResult('draftModalResult', '请输入草稿名称', 'error')
+    return
+  }
+
+  const draftData = {
+    name,
+    version: document.getElementById('draftVersion').value.trim(),
+    description: document.getElementById('draftDescription').value.trim()
+  }
+
+  try {
+    let result
+    if (currentEditingDraftId) {
+      result = await api('/api/drafts/' + encodeURIComponent(currentEditingDraftId), 'PUT', draftData)
+    } else {
+      result = await api('/api/drafts', 'POST', draftData)
+    }
+    showResult('draftModalResult', (currentEditingDraftId ? '更新' : '创建') + '成功: ' + result.draft.name, 'success')
+    setTimeout(() => {
+      closeDraftModal()
+      loadDrafts()
+      loadDraftLogs()
+      peekDraftUndo()
+    }, 600)
+  } catch (e) {
+    if (e.message && (e.message.includes('同名') || e.message.includes('同版本'))) {
+      const msg = e.message + '\n\n是否强制覆盖？'
+      if (confirm(msg)) {
+        try {
+          draftData.force = true
+          let result
+          if (currentEditingDraftId) {
+            result = await api('/api/drafts/' + encodeURIComponent(currentEditingDraftId), 'PUT', draftData)
+          } else {
+            result = await api('/api/drafts', 'POST', draftData)
+          }
+          showResult('draftModalResult', '已覆盖: ' + result.draft.name, 'success')
+          setTimeout(() => {
+            closeDraftModal()
+            loadDrafts()
+            loadDraftLogs()
+            peekDraftUndo()
+          }, 600)
+        } catch (e2) {
+          showResult('draftModalResult', '保存失败: ' + e2.message, 'error')
+        }
+      }
+    } else {
+      showResult('draftModalResult', '保存失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function deleteDraft(id) {
+  if (!confirm('确定删除此草稿？此操作可撤销。')) return
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id), 'DELETE')
+    showResult('draftsResult', '已删除草稿', 'success')
+    loadDrafts()
+    loadDraftLogs()
+    peekDraftUndo()
+  } catch (e) {
+    showResult('draftsResult', '删除失败: ' + e.message, 'error')
+  }
+}
+
+async function duplicateDraft(id) {
+  const newName = prompt('输入新草稿名称：')
+  if (newName === null) return
+  const trimmedName = newName.trim()
+  if (!trimmedName) {
+    alert('请输入草稿名称')
+    return
+  }
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/duplicate', 'POST', { newName: trimmedName })
+    showResult('draftsResult', '已复制草稿: ' + result.draft.name, 'success')
+    loadDrafts()
+    loadDraftLogs()
+    peekDraftUndo()
+  } catch (e) {
+    showResult('draftsResult', '复制失败: ' + e.message, 'error')
+  }
+}
+
+async function applyDraft(id) {
+  if (!confirm('确定应用此草稿？当前工作区的提交将被替换。')) return
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/apply', 'POST')
+    showResult('draftsResult', `已应用草稿: ${result.draft.name} (${result.appliedCommitCount} 条提交)`, 'success')
+    loadCommits()
+  } catch (e) {
+    showResult('draftsResult', '应用失败: ' + e.message, 'error')
+  }
+}
+
+async function archiveFromDraft(id) {
+  if (!confirm('确定从此草稿归档？归档后草稿将被删除，提交将移动到归档中。')) return
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/archive', 'POST')
+    showResult('draftsResult', `已归档: ${result.draft.version} (${result.snapshot.commitCount} 条提交)`, 'success')
+    loadDrafts()
+    loadDraftLogs()
+    peekDraftUndo()
+    loadArchives()
+    loadExportVersions()
+  } catch (e) {
+    showResult('draftsResult', '归档失败: ' + e.message, 'error')
+  }
+}
+
+async function viewDraft(id) {
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id), 'GET')
+    const draft = result.draft
+    const modal = document.getElementById('viewDraftModal')
+    document.getElementById('viewDraftTitle').textContent = `草稿: ${draft.name}`
+    
+    const groups = { breaking: [], feature: [], fix: [], other: [], ignored: [] }
+    draft.commits.forEach(c => {
+      const cat = c.category || 'other'
+      if (!groups[cat]) groups[cat] = []
+      groups[cat].push(c)
+    })
+    
+    let html = `<p>版本号: ${escHtml(draft.version || '(未设置)')} | 提交数: ${draft.commits.length} | 更新时间: ${escHtml(draft.updatedAt)}</p>`
+    if (draft.description) {
+      html += `<p>描述: ${escHtml(draft.description)}</p>`
+    }
+    
+    const labels = { breaking: '破坏性变更', feature: '新功能', fix: '修复', other: '其他', ignored: '已忽略' }
+    Object.keys(labels).forEach(cat => {
+      if (groups[cat] && groups[cat].length > 0) {
+        html += `<h4>${labels[cat]} (${groups[cat].length})</h4><ul>`
+        groups[cat].forEach(c => {
+          html += `<li>${escHtml(c.message)}${c.ticket ? ' [' + escHtml(c.ticket) + ']' : ''}${c.note ? ' — <em>' + escHtml(c.note) + '</em>' : ''} <small>(${shortId(c.id)}, 来源: ${c.source})</small></li>`
+        })
+        html += `</ul>`
+      }
+    })
+    
+    document.getElementById('viewDraftBody').innerHTML = html
+    modal.classList.remove('hidden')
+  } catch (e) {
+    alert('查看失败: ' + e.message)
+  }
+}
+
+function closeViewDraftModal() {
+  document.getElementById('viewDraftModal').classList.add('hidden')
+}
+
+async function exportDraftJson(id) {
+  try {
+    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/export', 'POST')
+    const jsonStr = JSON.stringify(result.data, null, 2)
+    const blob = new Blob([jsonStr], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'draft-' + (result.data.draft ? (result.data.draft.name || 'export') : 'export') + '.json'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    showResult('draftsResult', '草稿已导出为 JSON 文件', 'success')
+  } catch (e) {
+    showResult('draftsResult', '导出失败: ' + e.message, 'error')
+  }
+}
+
+function openImportDraftModal() {
+  document.getElementById('importDraftModal').classList.remove('hidden')
+  document.getElementById('importDraftJson').value = ''
+  document.getElementById('importDraftAsName').value = ''
+  document.getElementById('importDraftForce').checked = false
+  document.getElementById('importDraftResult').classList.add('hidden')
+  const fileInput = document.getElementById('importDraftFile')
+  if (fileInput) fileInput.value = ''
+}
+
+function closeImportDraftModal() {
+  document.getElementById('importDraftModal').classList.add('hidden')
+}
+
+async function getImportDraftData() {
+  const fileInput = document.getElementById('importDraftFile')
+  const jsonText = document.getElementById('importDraftJson').value.trim()
+
+  if (fileInput.files && fileInput.files.length > 0) {
+    const text = await readFileAsText(fileInput.files[0])
+    return JSON.parse(text)
+  } else if (jsonText) {
+    return JSON.parse(jsonText)
+  }
+  return null
+}
+
+async function doValidateDraftImport() {
+  try {
+    const data = await getImportDraftData()
+    if (!data) {
+      showResult('importDraftResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    if (!data.type || data.type !== 'release-notes-draft') {
+      showResult('importDraftResult', '校验失败: 不是有效的草稿文件', 'error')
+      return
+    }
+    showResult('importDraftResult', '校验通过', 'success')
+  } catch (e) {
+    showResult('importDraftResult', '校验失败: ' + e.message, 'error')
+  }
+}
+
+async function doImportDraft() {
+  try {
+    const data = await getImportDraftData()
+    if (!data) {
+      showResult('importDraftResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    const asName = document.getElementById('importDraftAsName').value.trim()
+    const force = document.getElementById('importDraftForce').checked
+    const body = { draftData: data, force }
+    if (asName) body.asName = asName
+
+    const result = await api('/api/drafts/import', 'POST', body)
+    showResult('importDraftResult', '导入成功: ' + result.draft.name, 'success')
+    setTimeout(() => {
+      closeImportDraftModal()
+      loadDrafts()
+      loadDraftLogs()
+      peekDraftUndo()
+    }, 600)
+  } catch (e) {
+    if (e.message && (e.message.includes('同名') || e.message.includes('同版本'))) {
+      const msg = e.message + '\n\n是否强制覆盖？'
+      if (confirm(msg)) {
+        try {
+          const data = await getImportDraftData()
+          const asName = document.getElementById('importDraftAsName').value.trim()
+          const body = { draftData: data, force: true }
+          if (asName) body.asName = asName
+          const result = await api('/api/drafts/import', 'POST', body)
+          showResult('importDraftResult', '已覆盖: ' + result.draft.name, 'success')
+          setTimeout(() => {
+            closeImportDraftModal()
+            loadDrafts()
+            loadDraftLogs()
+            peekDraftUndo()
+          }, 600)
+        } catch (e2) {
+          showResult('importDraftResult', '导入失败: ' + e2.message, 'error')
+        }
+      }
+    } else {
+      showResult('importDraftResult', '导入失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function quickSaveDraft() {
+  const name = document.getElementById('quickDraftName').value.trim()
+  const version = document.getElementById('quickDraftVersion').value.trim()
+  const desc = document.getElementById('quickDraftDesc').value.trim()
+
+  if (!name) {
+    showResult('draftsResult', '请输入草稿名称', 'error')
+    return
+  }
+
+  try {
+    const result = await api('/api/drafts', 'POST', { name, version, description: desc })
+    showResult('draftsResult', `已保存草稿: ${result.draft.name} (${result.draft.commitCount} 条提交)`, 'success')
+    document.getElementById('quickDraftName').value = ''
+    document.getElementById('quickDraftVersion').value = ''
+    document.getElementById('quickDraftDesc').value = ''
+    loadDrafts()
+    loadDraftLogs()
+    peekDraftUndo()
+  } catch (e) {
+    if (e.message && (e.message.includes('同名') || e.message.includes('同版本'))) {
+      const msg = e.message + '\n\n是否强制覆盖？'
+      if (confirm(msg)) {
+        try {
+          const result = await api('/api/drafts', 'POST', { name, version, description: desc, force: true })
+          showResult('draftsResult', `已覆盖草稿: ${result.draft.name} (${result.draft.commitCount} 条提交)`, 'success')
+          document.getElementById('quickDraftName').value = ''
+          document.getElementById('quickDraftVersion').value = ''
+          document.getElementById('quickDraftDesc').value = ''
+          loadDrafts()
+          loadDraftLogs()
+          peekDraftUndo()
+        } catch (e2) {
+          showResult('draftsResult', '保存失败: ' + e2.message, 'error')
+        }
+      }
+    } else {
+      showResult('draftsResult', '保存失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function loadDraftLogs() {
+  try {
+    const result = await api('/api/drafts/logs?limit=20', 'GET')
+    const logs = result.logs || []
+    const el = document.getElementById('draftLogsList')
+    if (logs.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无操作日志</p>'
+      return
+    }
+    const actionLabels = { create: '创建', update: '更新', delete: '删除', duplicate: '复制', apply: '应用', archive: '归档', undo: '撤销', import: '导入', export: '导出' }
+    el.innerHTML = logs.map(l => {
+      const lbl = actionLabels[l.action] || l.action
+      return `
+        <div class="log-item">
+          <span class="log-action">[${lbl}]</span>
+          <span class="log-name">${escHtml(l.draftName || l.description || '')}</span>
+          <span class="log-time">${escHtml(l.timestamp || '')}</span>
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    document.getElementById('draftLogsList').innerHTML = '<p style="color:#e74c3c">加载失败</p>'
+  }
+}
+
+async function peekDraftUndo() {
+  try {
+    const snap = await api('/api/drafts/undo/peek', 'GET')
+    const el = document.getElementById('draftUndoInfo')
+    if (!snap || !snap.description) {
+      el.textContent = '没有可撤销的草稿操作'
+      el.style.color = '#999'
+    } else {
+      el.textContent = '可撤销: ' + snap.description + ' (' + snap.timestamp + ')'
+      el.style.color = '#333'
+    }
+  } catch {
+    document.getElementById('draftUndoInfo').textContent = '加载失败'
+  }
+}
+
+async function undoDraftChange() {
+  if (!confirm('确定撤销最近一次草稿操作？')) return
+  try {
+    const result = await api('/api/drafts/undo', 'POST')
+    let msg = '已撤销'
+    if (result.description) msg += ': ' + result.description
+    showResult('draftsResult', msg, 'success')
+    loadDrafts()
+    loadDraftLogs()
+    peekDraftUndo()
+  } catch (e) {
+    showResult('draftsResult', '撤销失败: ' + e.message, 'error')
   }
 }
 

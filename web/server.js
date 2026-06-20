@@ -13,6 +13,7 @@ const archiver = require('../src/archiver')
 const exporter = require('../src/exporter')
 const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
+const draft = require('../src/draft')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -510,6 +511,196 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/export/profiles/undo/peek' && method === 'GET') {
     try {
       return sendJson(res, exportProfile.peekUndo())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts' && method === 'GET') {
+    try {
+      const drafts = draft.listDrafts()
+      return sendJson(res, { drafts })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = draft.createDraft(body)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && method === 'GET') {
+    const id = url.pathname.substring('/api/drafts/'.length)
+    if (!id || id === 'logs' || id === 'undo') {
+    } else {
+      try {
+        const d = draft.getDraft(id)
+        if (!d) return sendError(res, `草稿不存在: ${id}`, 404)
+        return sendJson(res, { draft: d })
+      } catch (e) {
+        return sendError(res, e.message)
+      }
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && method === 'PUT') {
+    const id = url.pathname.substring('/api/drafts/'.length)
+    const body = await parseBody(req)
+    try {
+      const result = draft.updateDraft(id, body, { force: body.force })
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && method === 'DELETE') {
+    const id = url.pathname.substring('/api/drafts/'.length)
+    try {
+      const result = draft.deleteDraft(id)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/duplicate') && method === 'POST') {
+    const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/duplicate'.length)
+    const body = await parseBody(req)
+    try {
+      const result = draft.duplicateDraft(id, body.newName)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/apply') && method === 'POST') {
+    const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/apply'.length)
+    try {
+      const result = draft.applyDraft(id)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/archive') && method === 'POST') {
+    const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/archive'.length)
+    try {
+      const result = draft.archiveDraft(id)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/export') && method === 'POST') {
+    const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/export'.length)
+    const body = await parseBody(req)
+    try {
+      if (body.outputPath) {
+        const result = draft.exportDraftToFile(id, body.outputPath)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+        return sendJson(res, result)
+      } else {
+        const result = draft.exportDraftToJson(id)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+        return sendJson(res, result)
+      }
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/compare' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = draft.compareDrafts(body.id1, body.id2)
+      if (!result.success && result.errors) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/import' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      const opts = { force: body.force }
+      if (body.asName) opts.asName = body.asName
+      if (body.path) {
+        result = draft.importDraftFromFile(body.path, opts)
+      } else if (body.draftData) {
+        result = draft.importDraftFromJson(body.draftData, opts)
+      } else {
+        return sendError(res, '缺少 path 或 draftData 参数')
+      }
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '20', 10)
+    try {
+      const logs = draft.listLogs(isNaN(n) ? 20 : n)
+      return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/undo' && method === 'POST') {
+    try {
+      const result = draft.undoLastChange()
+      if (!result.success && result.reason) {
+        return sendError(res, result.reason, 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/undo/peek' && method === 'GET') {
+    try {
+      return sendJson(res, draft.peekUndo())
     } catch (e) {
       return sendError(res, e.message)
     }
