@@ -58,6 +58,13 @@ document.querySelectorAll('.tab').forEach(btn => {
       peekRestoreUndo()
       loadRestoreLogs()
     }
+    if (btn.dataset.tab === 'profiles') {
+      loadProfiles()
+      loadProfileLogs()
+      peekProfileUndo()
+      loadQuickExportVersions()
+      loadQuickExportProfiles()
+    }
   })
 })
 
@@ -856,6 +863,505 @@ async function undoLastRestore() {
     }
   } catch (e) {
     showResult('configResult', '撤销失败: ' + e.message, 'error')
+  }
+}
+
+let currentEditingProfileId = null
+
+async function loadProfiles() {
+  try {
+    const result = await api('/api/export/profiles', 'GET')
+    exportProfilesCache = result.profiles || []
+    const el = document.getElementById('profilesList')
+    if (exportProfilesCache.length === 0) {
+      el.innerHTML = '<p style="color:#999;text-align:center;padding:20px">暂无导出方案，点击"新建方案"创建第一个</p>'
+      return
+    }
+    el.innerHTML = exportProfilesCache.map(p => renderProfileCard(p)).join('')
+  } catch (e) {
+    document.getElementById('profilesList').innerHTML = '<p style="color:#e74c3c">加载失败: ' + escHtml(e.message) + '</p>'
+  }
+}
+
+let exportProfilesCache = []
+
+function renderProfileCard(p) {
+  const defBadge = p.isDefault ? '<span class="profile-badge default">默认</span>' : ''
+  const opts = []
+  if (p.includeTicket) opts.push('工单')
+  if (p.includeAuthor) opts.push('作者')
+  if (p.includeDate) opts.push('日期')
+  return `
+    <div class="profile-card ${p.isDefault ? 'is-default' : ''}">
+      <div class="profile-header">
+        <div>
+          <strong class="profile-name">${escHtml(p.name)}</strong>
+          ${defBadge}
+        </div>
+        <div class="profile-actions">
+          ${!p.isDefault ? '<button onclick="setDefaultProfile(\'' + p.id + '\')" class="secondary small">设为默认</button>' : ''}
+          <button onclick="editProfile('${p.id}')" class="secondary small">编辑</button>
+          <button onclick="duplicateProfile('${p.id}')" class="secondary small">复制</button>
+          <button onclick="exportProfileJson('${p.id}')" class="secondary small">导出</button>
+          <button onclick="deleteProfile('${p.id}')" class="danger small">删除</button>
+        </div>
+      </div>
+      <div class="profile-body">
+        <div class="profile-info-row">
+          <span class="profile-label">标题模板:</span>
+          <span class="profile-value">${escHtml(p.titleTemplate)}</span>
+        </div>
+        <div class="profile-info-row">
+          <span class="profile-label">分组顺序:</span>
+          <span class="profile-value">${p.groupOrder.map(catLabel).join(' → ')}</span>
+        </div>
+        <div class="profile-info-row">
+          <span class="profile-label">包含项:</span>
+          <span class="profile-value">${opts.length > 0 ? opts.join('、') : '无'}</span>
+        </div>
+        <div class="profile-info-row">
+          <span class="profile-label">输出目录:</span>
+          <span class="profile-value">${escHtml(p.outputDir) || '(默认)'}</span>
+        </div>
+        <div class="profile-meta">
+          创建: ${escHtml(p.createdAt || '')} | 更新: ${escHtml(p.updatedAt || '')}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function catLabel(cat) {
+  const map = { breaking: '⚠ 破坏性', feature: '✨ 功能', fix: '🐛 修复', other: '📋 其他' }
+  return map[cat] || cat
+}
+
+function openProfileModal(profileId) {
+  currentEditingProfileId = profileId || null
+  const modal = document.getElementById('profileModal')
+  const titleEl = document.getElementById('profileModalTitle')
+  const resultEl = document.getElementById('profileModalResult')
+  resultEl.classList.add('hidden')
+
+  if (profileId) {
+    titleEl.textContent = '编辑方案'
+    const profile = exportProfilesCache.find(p => p.id === profileId)
+    if (profile) {
+      document.getElementById('profileName').value = profile.name
+      document.getElementById('profileTitleTemplate').value = profile.titleTemplate
+      document.getElementById('profileIncludeTicket').checked = profile.includeTicket
+      document.getElementById('profileIncludeAuthor').checked = profile.includeAuthor
+      document.getElementById('profileIncludeDate').checked = profile.includeDate
+      document.getElementById('profileOutputDir').value = profile.outputDir || ''
+      setGroupOrder(profile.groupOrder)
+    }
+  } else {
+    titleEl.textContent = '新建方案'
+    document.getElementById('profileName').value = ''
+    document.getElementById('profileTitleTemplate').value = '发布说明 - ${version}'
+    document.getElementById('profileIncludeTicket').checked = true
+    document.getElementById('profileIncludeAuthor').checked = false
+    document.getElementById('profileIncludeDate').checked = true
+    document.getElementById('profileOutputDir').value = ''
+    setGroupOrder(['breaking', 'feature', 'fix', 'other'])
+  }
+
+  modal.classList.remove('hidden')
+  document.getElementById('profileName').focus()
+}
+
+function closeProfileModal() {
+  document.getElementById('profileModal').classList.add('hidden')
+  currentEditingProfileId = null
+}
+
+function editProfile(id) {
+  openProfileModal(id)
+}
+
+function setGroupOrder(order) {
+  const container = document.getElementById('groupOrderList')
+  const items = Array.from(container.children)
+  order.forEach(cat => {
+    const item = items.find(it => it.dataset.cat === cat)
+    if (item) {
+      container.appendChild(item)
+      const cb = item.querySelector('.group-cb')
+      if (cb) cb.checked = true
+    }
+  })
+  items.forEach(item => {
+    const cat = item.dataset.cat
+    if (!order.includes(cat)) {
+      const cb = item.querySelector('.group-cb')
+      if (cb) cb.checked = false
+    }
+  })
+}
+
+function getGroupOrder() {
+  const container = document.getElementById('groupOrderList')
+  const items = Array.from(container.children)
+  return items
+    .filter(it => {
+      const cb = it.querySelector('.group-cb')
+      return cb && cb.checked
+    })
+    .map(it => it.dataset.cat)
+}
+
+async function saveProfile() {
+  const name = document.getElementById('profileName').value.trim()
+  const resultEl = document.getElementById('profileModalResult')
+
+  if (!name) {
+    showResult('profileModalResult', '请输入方案名称', 'error')
+    return
+  }
+
+  const groupOrder = getGroupOrder()
+  if (groupOrder.length === 0) {
+    showResult('profileModalResult', '请至少选择一个分组', 'error')
+    return
+  }
+
+  const profileData = {
+    name,
+    titleTemplate: document.getElementById('profileTitleTemplate').value,
+    groupOrder,
+    includeTicket: document.getElementById('profileIncludeTicket').checked,
+    includeAuthor: document.getElementById('profileIncludeAuthor').checked,
+    includeDate: document.getElementById('profileIncludeDate').checked,
+    outputDir: document.getElementById('profileOutputDir').value.trim()
+  }
+
+  try {
+    let result
+    if (currentEditingProfileId) {
+      result = await api('/api/export/profiles/' + encodeURIComponent(currentEditingProfileId), 'PUT', profileData)
+    } else {
+      result = await api('/api/export/profiles', 'POST', profileData)
+    }
+    showResult('profileModalResult', (currentEditingProfileId ? '更新' : '创建') + '成功: ' + result.profile.name, 'success')
+    setTimeout(() => {
+      closeProfileModal()
+      loadProfiles()
+      loadProfileLogs()
+      peekProfileUndo()
+      loadQuickExportProfiles()
+    }, 600)
+  } catch (e) {
+    if (e.message && (e.message.includes('同名') || e.message.includes('已存在'))) {
+      const msg = e.message + '\n\n是否强制覆盖？'
+      if (confirm(msg)) {
+        try {
+          profileData.force = true
+          let result
+          if (currentEditingProfileId) {
+            result = await api('/api/export/profiles/' + encodeURIComponent(currentEditingProfileId), 'PUT', profileData)
+          } else {
+            result = await api('/api/export/profiles', 'POST', profileData)
+          }
+          showResult('profileModalResult', '已覆盖同名方案: ' + result.profile.name, 'success')
+          setTimeout(() => {
+            closeProfileModal()
+            loadProfiles()
+            loadProfileLogs()
+            peekProfileUndo()
+            loadQuickExportProfiles()
+          }, 600)
+        } catch (e2) {
+          showResult('profileModalResult', '保存失败: ' + e2.message, 'error')
+        }
+      }
+    } else {
+      showResult('profileModalResult', '保存失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function deleteProfile(id) {
+  if (!confirm('确定删除此方案？此操作可撤销。')) return
+  try {
+    const result = await api('/api/export/profiles/' + encodeURIComponent(id), 'DELETE')
+    let msg = '已删除方案'
+    if (result.wasDefault) msg += '（被删除的是默认方案）'
+    if (result.newDefault) msg += '\n新的默认方案已自动分配'
+    showResult('profilesResult', msg, 'success')
+    loadProfiles()
+    loadProfileLogs()
+    peekProfileUndo()
+    loadQuickExportProfiles()
+  } catch (e) {
+    showResult('profilesResult', '删除失败: ' + e.message, 'error')
+  }
+}
+
+async function setDefaultProfile(id) {
+  try {
+    const result = await api('/api/export/profiles/default', 'POST', { id })
+    showResult('profilesResult', '已设为默认方案', 'success')
+    loadProfiles()
+    loadProfileLogs()
+    peekProfileUndo()
+    loadQuickExportProfiles()
+  } catch (e) {
+    showResult('profilesResult', '设置失败: ' + e.message, 'error')
+  }
+}
+
+async function duplicateProfile(id) {
+  const newName = prompt('输入新方案名称：')
+  if (newName === null) return
+  const trimmedName = newName.trim()
+  if (!trimmedName) {
+    alert('请输入方案名称')
+    return
+  }
+  try {
+    const result = await api('/api/export/profiles/' + encodeURIComponent(id) + '/duplicate', 'POST', { newName: trimmedName })
+    showResult('profilesResult', '已复制方案: ' + result.profile.name, 'success')
+    loadProfiles()
+    loadProfileLogs()
+    peekProfileUndo()
+    loadQuickExportProfiles()
+  } catch (e) {
+    showResult('profilesResult', '复制失败: ' + e.message, 'error')
+  }
+}
+
+async function exportProfileJson(id) {
+  try {
+    const result = await api('/api/export/profiles/' + encodeURIComponent(id) + '/export', 'POST')
+    const jsonStr = JSON.stringify(result.data, null, 2)
+    const blob = new Blob([jsonStr], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'profile-' + (result.data.profile ? (result.data.profile.name || 'export') : 'export') + '.json'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    showResult('profilesResult', '方案已导出为 JSON 文件', 'success')
+  } catch (e) {
+    showResult('profilesResult', '导出失败: ' + e.message, 'error')
+  }
+}
+
+function openImportProfileModal() {
+  document.getElementById('importProfileModal').classList.remove('hidden')
+  document.getElementById('importProfileJson').value = ''
+  document.getElementById('importProfileAsName').value = ''
+  document.getElementById('importProfileForce').checked = false
+  document.getElementById('importProfileResult').classList.add('hidden')
+  const fileInput = document.getElementById('importProfileFile')
+  if (fileInput) fileInput.value = ''
+}
+
+function closeImportProfileModal() {
+  document.getElementById('importProfileModal').classList.add('hidden')
+}
+
+async function getImportProfileData() {
+  const fileInput = document.getElementById('importProfileFile')
+  const jsonText = document.getElementById('importProfileJson').value.trim()
+
+  if (fileInput.files && fileInput.files.length > 0) {
+    const text = await readFileAsText(fileInput.files[0])
+    return JSON.parse(text)
+  } else if (jsonText) {
+    return JSON.parse(jsonText)
+  }
+  return null
+}
+
+async function doValidateImport() {
+  try {
+    const data = await getImportProfileData()
+    if (!data) {
+      showResult('importProfileResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    const result = await api('/api/export/profiles/validate', 'POST', { profileData: data })
+    let msg = '校验结果: ' + (result.valid ? '通过' : '失败')
+    if (result.info && result.info.length > 0) msg += '\n信息:\n' + result.info.map(i => '  ℹ ' + i).join('\n')
+    if (result.warnings && result.warnings.length > 0) msg += '\n警告:\n' + result.warnings.map(w => '  ⚠ ' + w).join('\n')
+    if (result.errors && result.errors.length > 0) msg += '\n错误:\n' + result.errors.map(e => '  ✗ ' + e).join('\n')
+    showResult('importProfileResult', msg, result.valid ? 'success' : 'error')
+  } catch (e) {
+    showResult('importProfileResult', '校验失败: ' + e.message, 'error')
+  }
+}
+
+async function doImportProfile() {
+  try {
+    const data = await getImportProfileData()
+    if (!data) {
+      showResult('importProfileResult', '请选择文件或粘贴 JSON 内容', 'error')
+      return
+    }
+    const asName = document.getElementById('importProfileAsName').value.trim()
+    const force = document.getElementById('importProfileForce').checked
+    const body = { profileData: data, force }
+    if (asName) body.asName = asName
+
+    const result = await api('/api/export/profiles/import', 'POST', body)
+    showResult('importProfileResult', '导入成功: ' + result.profile.name, 'success')
+    setTimeout(() => {
+      closeImportProfileModal()
+      loadProfiles()
+      loadProfileLogs()
+      peekProfileUndo()
+      loadQuickExportProfiles()
+    }, 600)
+  } catch (e) {
+    if (e.message && (e.message.includes('同名') || e.message.includes('已存在'))) {
+      const msg = e.message + '\n\n是否强制覆盖？'
+      if (confirm(msg)) {
+        try {
+          const data = await getImportProfileData()
+          const asName = document.getElementById('importProfileAsName').value.trim()
+          const body = { profileData: data, force: true }
+          if (asName) body.asName = asName
+          const result = await api('/api/export/profiles/import', 'POST', body)
+          showResult('importProfileResult', '已覆盖同名方案: ' + result.profile.name, 'success')
+          setTimeout(() => {
+            closeImportProfileModal()
+            loadProfiles()
+            loadProfileLogs()
+            peekProfileUndo()
+            loadQuickExportProfiles()
+          }, 600)
+        } catch (e2) {
+          showResult('importProfileResult', '导入失败: ' + e2.message, 'error')
+        }
+      }
+    } else {
+      showResult('importProfileResult', '导入失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function loadProfileLogs() {
+  try {
+    const result = await api('/api/export/profiles/logs?limit=20', 'GET')
+    const logs = result.logs || []
+    const el = document.getElementById('profileLogsList')
+    if (logs.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无操作日志</p>'
+      return
+    }
+    const actionLabels = { create: '创建', update: '更新', delete: '删除', set_default: '设默认', duplicate: '复制', undo: '撤销', import: '导入', export: '导出' }
+    el.innerHTML = logs.map(l => {
+      const lbl = actionLabels[l.action] || l.action
+      return `
+        <div class="log-item">
+          <span class="log-action">[${lbl}]</span>
+          <span class="log-name">${escHtml(l.profileName || l.description || '')}</span>
+          <span class="log-time">${escHtml(l.timestamp || '')}</span>
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    document.getElementById('profileLogsList').innerHTML = '<p style="color:#e74c3c">加载失败</p>'
+  }
+}
+
+async function peekProfileUndo() {
+  try {
+    const snap = await api('/api/export/profiles/undo/peek', 'GET')
+    const el = document.getElementById('profileUndoInfo')
+    if (!snap || !snap.description) {
+      el.textContent = '没有可撤销的方案操作'
+      el.style.color = '#999'
+    } else {
+      el.textContent = '可撤销: ' + snap.description + ' (' + snap.timestamp + ')'
+      el.style.color = '#333'
+    }
+  } catch {
+    document.getElementById('profileUndoInfo').textContent = '加载失败'
+  }
+}
+
+async function undoProfileChange() {
+  if (!confirm('确定撤销最近一次方案操作？')) return
+  try {
+    const result = await api('/api/export/profiles/undo', 'POST')
+    let msg = '已撤销'
+    if (result.description) msg += ': ' + result.description
+    showResult('profilesResult', msg, 'success')
+    loadProfiles()
+    loadProfileLogs()
+    peekProfileUndo()
+    loadQuickExportProfiles()
+  } catch (e) {
+    showResult('profilesResult', '撤销失败: ' + e.message, 'error')
+  }
+}
+
+async function loadQuickExportProfiles() {
+  try {
+    const result = await api('/api/export/profiles', 'GET')
+    exportProfilesCache = result.profiles || []
+    const sel = document.getElementById('quickExportProfile')
+    let html = '<option value="">默认方案</option>'
+    exportProfilesCache.forEach(p => {
+      const defMark = p.isDefault ? ' [默认]' : ''
+      html += `<option value="${escHtml(p.id)}">${escHtml(p.name)}${defMark}</option>`
+    })
+    sel.innerHTML = html
+    const defP = exportProfilesCache.find(p => p.isDefault)
+    if (defP) sel.value = defP.id
+  } catch {}
+}
+
+async function loadQuickExportVersions() {
+  try {
+    const list = await api('/api/archives')
+    const sel = document.getElementById('quickExportVersion')
+    if (list.length === 0) {
+      sel.innerHTML = '<option value="">暂无已归档版本</option>'
+      return
+    }
+    sel.innerHTML = list.map(a => `<option value="${escHtml(a.version)}">${escHtml(a.version)}</option>`).join('')
+  } catch {}
+}
+
+async function quickPreviewExport() {
+  const version = document.getElementById('quickExportVersion').value
+  const profileId = document.getElementById('quickExportProfile').value
+  if (!version) {
+    alert('请选择已归档版本')
+    return
+  }
+  try {
+    const body = { version }
+    if (profileId) body.profileId = profileId
+    const result = await api('/api/export', 'POST', body)
+    const el = document.getElementById('quickExportResult')
+    el.className = 'result-box success'
+    el.innerHTML = `<h4>${escHtml(version)} 发布说明 ${result.profileName ? '(' + escHtml(result.profileName) + ')' : ''}</h4><pre style="max-height:400px;overflow:auto">${escHtml(result.markdown)}</pre>`
+    el.classList.remove('hidden')
+  } catch (e) {
+    showResult('quickExportResult', '预览失败: ' + e.message, 'error')
+  }
+}
+
+async function quickExportToFile() {
+  const version = document.getElementById('quickExportVersion').value
+  const profileId = document.getElementById('quickExportProfile').value
+  if (!version) {
+    alert('请选择已归档版本')
+    return
+  }
+  try {
+    const body = { version }
+    if (profileId) body.profileId = profileId
+    const result = await api('/api/export/file', 'POST', body)
+    showResult('quickExportResult', '已导出到文件: ' + result.path, 'success')
+  } catch (e) {
+    showResult('quickExportResult', '导出失败: ' + e.message, 'error')
   }
 }
 

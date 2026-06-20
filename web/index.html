@@ -14,6 +14,7 @@
       <button class="tab" data-tab="classify">分类</button>
       <button class="tab" data-tab="review">复核</button>
       <button class="tab" data-tab="archive">归档</button>
+      <button class="tab" data-tab="profiles">导出方案</button>
       <button class="tab" data-tab="config">配置</button>
     </nav>
   </header>
@@ -134,6 +135,59 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
       <div id="exportResult" class="result-box hidden"></div>
     </section>
 
+    <section id="tab-profiles" class="tab-content">
+      <h2>导出方案工作台</h2>
+      <p class="hint" style="margin-bottom:12px">管理导出 Markdown 的格式方案，可保存多种配置，支持设为默认、复制、导入导出 JSON，跨重启保留。</p>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">方案列表</h3>
+          <div>
+            <button onclick="openProfileModal()" class="primary">+ 新建方案</button>
+            <button onclick="openImportProfileModal()" class="secondary">导入 JSON</button>
+            <button onclick="loadProfiles()" class="secondary">刷新</button>
+          </div>
+        </div>
+        <div id="profilesList" class="profiles-list"></div>
+      </div>
+
+      <div class="card">
+        <h3>方案操作日志</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <span id="profileUndoInfo" style="color:#666;font-size:13px">检查中...</span>
+          <div>
+            <button onclick="peekProfileUndo()" class="secondary">刷新撤销信息</button>
+            <button onclick="undoProfileChange()" class="danger">撤销最近操作</button>
+          </div>
+        </div>
+        <div id="profileLogsList" style="max-height:200px;overflow-y:auto"></div>
+      </div>
+
+      <div class="card">
+        <h3>使用方案快速导出</h3>
+        <p class="hint">选择一个方案和已归档版本，预览或导出 Markdown。</p>
+        <div class="form-row">
+          <div class="form-group" style="flex:1">
+            <label>选择方案</label>
+            <select id="quickExportProfile">
+              <option value="">默认方案</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1">
+            <label>选择版本</label>
+            <select id="quickExportVersion"></select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="quickPreviewExport()">预览 Markdown</button>
+          <button onclick="quickExportToFile()" class="secondary">导出到文件</button>
+        </div>
+        <div id="quickExportResult" class="result-box hidden" style="margin-top:12px"></div>
+      </div>
+
+      <div id="profilesResult" class="result-box hidden"></div>
+    </section>
+
     <section id="tab-config" class="tab-content">
       <h2>规则配置</h2>
       <div class="card">
@@ -233,6 +287,96 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
       <span class="modal-close" onclick="closeModal()">&times;</span>
       <h3 id="modalTitle">提交详情</h3>
       <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-content modal-large">
+      <span class="modal-close" onclick="closeProfileModal()">&times;</span>
+      <h3 id="profileModalTitle">新建方案</h3>
+      <div class="form-group">
+        <label>方案名称 <span style="color:#e74c3c">*</span></label>
+        <input type="text" id="profileName" placeholder="例如: 标准发布说明">
+      </div>
+      <div class="form-group">
+        <label>标题模板</label>
+        <input type="text" id="profileTitleTemplate" placeholder="例如: 发布说明 - ${version}">
+        <small class="hint">支持 ${version} 占位符</small>
+      </div>
+      <div class="form-group">
+        <label>分组顺序（拖动排序）</label>
+        <div id="groupOrderList" class="group-order-list">
+          <div class="group-order-item" data-cat="breaking">
+            <span class="drag-handle">☰</span>
+            <span>⚠ 破坏性变更</span>
+            <label><input type="checkbox" class="group-cb" data-cat="breaking" checked> 启用</label>
+          </div>
+          <div class="group-order-item" data-cat="feature">
+            <span class="drag-handle">☰</span>
+            <span>✨ 新功能</span>
+            <label><input type="checkbox" class="group-cb" data-cat="feature" checked> 启用</label>
+          </div>
+          <div class="group-order-item" data-cat="fix">
+            <span class="drag-handle">☰</span>
+            <span>🐛 修复</span>
+            <label><input type="checkbox" class="group-cb" data-cat="fix" checked> 启用</label>
+          </div>
+          <div class="group-order-item" data-cat="other">
+            <span class="drag-handle">☰</span>
+            <span>📋 其他</span>
+            <label><input type="checkbox" class="group-cb" data-cat="other" checked> 启用</label>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label><input type="checkbox" id="profileIncludeTicket"> 包含工单号</label>
+        </div>
+        <div class="form-group">
+          <label><input type="checkbox" id="profileIncludeAuthor"> 包含作者</label>
+        </div>
+        <div class="form-group">
+          <label><input type="checkbox" id="profileIncludeDate"> 包含日期</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>输出目录</label>
+        <input type="text" id="profileOutputDir" placeholder="留空使用默认输出目录">
+        <small class="hint">导出 Markdown 文件时的默认保存目录</small>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button onclick="saveProfile()" id="profileSaveBtn">保存</button>
+        <button onclick="closeProfileModal()" class="secondary">取消</button>
+      </div>
+      <div id="profileModalResult" class="result-box hidden" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="importProfileModal" class="modal hidden">
+    <div class="modal-content">
+      <span class="modal-close" onclick="closeImportProfileModal()">&times;</span>
+      <h3>导入方案</h3>
+      <div class="form-group">
+        <label>选择 JSON 文件</label>
+        <input type="file" id="importProfileFile" accept=".json,application/json">
+      </div>
+      <div class="form-group">
+        <label>或粘贴 JSON 内容</label>
+        <textarea id="importProfileJson" rows="6" placeholder='{"schemaVersion":1,"profile":{...}}'></textarea>
+      </div>
+      <div class="form-group">
+        <label>导入后重命名（可选）</label>
+        <input type="text" id="importProfileAsName" placeholder="留空使用原名">
+      </div>
+      <div class="form-group">
+        <label><input type="checkbox" id="importProfileForce"> 同名时覆盖现有方案</label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button onclick="doImportProfile()">导入</button>
+        <button onclick="doValidateImport()" class="secondary">校验格式</button>
+        <button onclick="closeImportProfileModal()" class="secondary">取消</button>
+      </div>
+      <div id="importProfileResult" class="result-box hidden" style="margin-top:12px"></div>
     </div>
   </div>
 
