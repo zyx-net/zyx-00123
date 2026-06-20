@@ -10,7 +10,7 @@ const config = require('../src/config')
 const TEST_DATA_DIR = path.join(__dirname, '..', 'data')
 
 function cleanTestData() {
-  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'draft_undo_stack', 'undo', 'config']
+  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'draft_undo_stack', 'undo', 'config', 'version_registry', 'version_registry_logs', 'version_registry_undo']
   files.forEach(f => {
     const fp = path.join(TEST_DATA_DIR, `${f}.json`)
     if (fs.existsSync(fp)) {
@@ -92,10 +92,11 @@ runTest('更新草稿', () => {
 
 runTest('复制草稿', () => {
   const list = draft.listDrafts()
-  const result = draft.duplicateDraft(list[0].id, '测试草稿1 副本')
+  const result = draft.duplicateDraft(list[0].id, '测试草稿1 副本', { version: 'v1.0.1' })
   assert(result.success, '复制应该成功')
   assert(result.draft.name === '测试草稿1 副本', '副本名称应该正确')
   assert(result.draft.id !== list[0].id, '副本ID应该不同')
+  assert(result.draft.version === 'v1.0.1', '副本版本应该正确')
 })
 
 console.log('\n--- 冲突处理测试 ---')
@@ -118,7 +119,7 @@ runTest('同版本草稿冲突检测', () => {
   const result = draft.createDraft({ name: '新版本草稿', version: 'v1.0.1' })
   assert(!result.success, '同版本草稿创建应该失败')
   assert(result.blocked, '应该被阻塞')
-  assert(result.reason === 'duplicate_version', '原因应该是重复版本')
+  assert(result.reason === 'version_occupied', '原因应该是版本被占用')
 })
 
 console.log('\n--- 应用与归档测试 ---')

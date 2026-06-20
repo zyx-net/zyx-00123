@@ -38,11 +38,6 @@ function findDuplicateName(name, excludeId) {
   return drafts.find(d => d.name === name && d.id !== excludeId) || null
 }
 
-function findDuplicateVersion(version, excludeId) {
-  const drafts = store.loadDrafts()
-  return drafts.find(d => d.version === version && d.id !== excludeId) || null
-}
-
 function createDraft(options) {
   options = options || {}
   const name = options.name
@@ -69,18 +64,32 @@ function createDraft(options) {
     }
   }
 
+  if (force && isAdmin && !takeoverReason) {
+    return {
+      success: false,
+      errors: ['管理员强制接管必须提供接管理由'],
+      blocked: true,
+      reason: 'no_takeover_reason'
+    }
+  }
+
+  let occupyResult = null
   if (version) {
-    const vr = versionRegistry.checkAvailability(version, { userId })
-    if (!vr.available && !vr.selfOccupied) {
-      if (force && isAdmin) {
-      } else {
-        return {
-          success: false,
-          errors: [`版本号 ${version} 已被占用: ${vr.occupier}（来源: ${vr.sourceAction || '未知'}，草稿: ${vr.draftName || '(未知)'}）`],
-          blocked: true,
-          reason: 'version_occupied',
-          versionConflict: vr
-        }
+    occupyResult = versionRegistry.occupyVersion(version, {
+      userId,
+      userName,
+      sourceAction: versionRegistry.SOURCE_CREATE,
+      force,
+      isAdmin,
+      reason: takeoverReason
+    })
+    if (!occupyResult.success) {
+      return {
+        success: false,
+        errors: occupyResult.errors,
+        blocked: occupyResult.blocked,
+        reason: occupyResult.reason,
+        versionConflict: occupyResult.conflict
       }
     }
   }
@@ -125,19 +134,34 @@ function createDraft(options) {
     drafts.push(draft)
   }
 
-  store.saveDrafts(drafts)
+  try {
+    store.saveDrafts(drafts)
+  } catch (e) {
+    if (version && occupyResult && occupyResult.success) {
+      versionRegistry.undoLastChange({ userId, userName })
+    }
+    return { success: false, errors: [`保存草稿失败: ${e.message}`], blocked: false }
+  }
 
-  if (version) {
-    versionRegistry.occupyVersion(version, {
+  if (version && occupyResult && occupyResult.entry) {
+    const updateResult = versionRegistry.occupyVersion(version, {
       userId,
       userName,
       draftId: draft.id,
       draftName: name,
       sourceAction: versionRegistry.SOURCE_CREATE,
-      force,
-      isAdmin,
-      reason: takeoverReason
+      force: true,
+      isAdmin: true
     })
+    if (!updateResult.success) {
+      store.saveDrafts(draftsBefore)
+      return {
+        success: false,
+        errors: updateResult.errors,
+        blocked: updateResult.blocked,
+        reason: updateResult.reason
+      }
+    }
   }
 
   store.appendDraftLog({
@@ -154,7 +178,9 @@ function createDraft(options) {
   return {
     success: true,
     draft,
-    overwritten: !!(byName && force)
+    overwritten: !!(byName && force),
+    versionRegistryEntry: occupyResult ? occupyResult.entry : null,
+    tookOver: occupyResult ? occupyResult.tookOver : false
   }
 }
 
@@ -292,13 +318,43 @@ function duplicateDraft(id, newName, options) {
 
   const name = newName || `${draftObj.name} (副本)`
 
+  const effectiveVersion = options.version !== undefined ? options.version : draftObj.version
+  const sourceDraftForOperation = effectiveVersion !== draftObj.version
+    ? { ...draftObj, version: effectiveVersion }
+    : draftObj
+
   const byName = findDuplicateName(name)
 
+  if ((resolve === 'force' || resolve === 'overwrite') && isAdmin && !takeoverReason) {
+    return {
+      success: false,
+      errors: ['管理员强制接管必须提供接管理由'],
+      blocked: true,
+      reason: 'no_takeover_reason'
+    }
+  }
+
   let versionConflict = null
-  if (draftObj.version) {
-    const vr = versionRegistry.checkAvailability(draftObj.version, { userId })
-    if (!vr.available && !vr.selfOccupied) {
-      versionConflict = vr
+  if (sourceDraftForOperation.version) {
+    const vr = versionRegistry.checkAvailability(sourceDraftForOperation.version, { userId })
+    const allDrafts = store.loadDrafts()
+    const draftWithSameVersion = allDrafts.find(d => d.version === sourceDraftForOperation.version)
+    
+    if (!vr.available || draftWithSameVersion) {
+      if (draftWithSameVersion) {
+        versionConflict = {
+          available: false,
+          existing: vr.existing || null,
+          reason: 'version_occupied',
+          occupier: vr.occupier || draftWithSameVersion.name,
+          sourceAction: vr.sourceAction || 'unknown',
+          draftName: draftWithSameVersion.name,
+          draftId: draftWithSameVersion.id,
+          updatedAt: draftWithSameVersion.updatedAt
+        }
+      } else {
+        versionConflict = vr
+      }
     }
   }
 
@@ -313,7 +369,7 @@ function duplicateDraft(id, newName, options) {
         existingId = byName.id
       }
       if (versionConflict) {
-        errors.push(`版本号 ${draftObj.version} 已被占用: ${versionConflict.occupier}（来源: ${versionConflict.sourceAction || '未知'}，草稿: ${versionConflict.draftName || '(未知)'}）`)
+        errors.push(`版本号 ${sourceDraftForOperation.version} 已被占用: ${versionConflict.occupier}（来源: ${versionConflict.sourceAction || '未知'}，草稿: ${versionConflict.draftName || '(未知)'}）`)
         if (!reason) {
           reason = 'version_occupied'
         }
@@ -331,10 +387,11 @@ function duplicateDraft(id, newName, options) {
           nameConflict: byName ? { existingId: byName.id, existingName: byName.name } : null,
           versionConflict: versionConflict ? {
             existingId: versionConflict.existing ? versionConflict.existing.draftId : null,
-            existingVersion: draftObj.version,
+            existingVersion: sourceDraftForOperation.version,
             existingName: versionConflict.draftName,
             occupier: versionConflict.occupier,
-            sourceAction: versionConflict.sourceAction
+            sourceAction: versionConflict.sourceAction,
+            availableActions: isAdmin ? ['rename', 'change_version', 'takeover'] : ['rename', 'change_version', 'cancel']
           } : null
         }
       }
@@ -347,14 +404,18 @@ function duplicateDraft(id, newName, options) {
         suffix++
         finalName = `${name} (${suffix})`
       }
-      let finalVersion = draftObj.version
+      let finalVersion = sourceDraftForOperation.version
       let versionSuffix = 1
       if (finalVersion) {
-        let vrAvail = versionRegistry.checkAvailability(finalVersion, { userId })
-        while (!vrAvail.available && !vrAvail.selfOccupied) {
+        const isVersionAvailable = (ver) => {
+          const vr = versionRegistry.checkAvailability(ver, { userId })
+          const allDrafts = store.loadDrafts()
+          const hasSameVersion = allDrafts.some(d => d.version === ver)
+          return vr.available && !hasSameVersion
+        }
+        while (!isVersionAvailable(finalVersion)) {
           versionSuffix++
-          finalVersion = `${draftObj.version}-副本${versionSuffix}`
-          vrAvail = versionRegistry.checkAvailability(finalVersion, { userId })
+          finalVersion = `${sourceDraftForOperation.version}-副本${versionSuffix}`
         }
       }
       const sourceWithNewVersion = { ...draftObj, version: finalVersion }
@@ -370,21 +431,43 @@ function duplicateDraft(id, newName, options) {
           reason: 'no_name_match'
         }
       }
-      return _doOverwriteDraft(draftObj, name, byName, { userId, userName, isAdmin, takeoverReason })
+      return _doOverwriteDraft(sourceDraftForOperation, name, byName, { userId, userName, isAdmin, takeoverReason })
     }
 
     if (resolve === 'force' && isAdmin && versionConflict) {
-      return _doDuplicateDraft(draftObj, name, { userId, userName, isAdmin, force: true, takeoverReason })
+      return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName, isAdmin, force: true, takeoverReason })
     }
   }
 
-  return _doDuplicateDraft(draftObj, name, { userId, userName })
+  return _doDuplicateDraft(sourceDraftForOperation, name, { userId, userName })
 }
 
 function _doDuplicateDraft(sourceDraft, newName, options) {
   options = options || {}
   const draftsBefore = store.loadDrafts()
   const now = new Date().toISOString()
+
+  let occupyResult = null
+  if (sourceDraft.version) {
+    occupyResult = versionRegistry.occupyVersion(sourceDraft.version, {
+      userId: options.userId,
+      userName: options.userName,
+      sourceAction: versionRegistry.SOURCE_DUPLICATE,
+      force: options.force || false,
+      isAdmin: options.isAdmin || false,
+      reason: options.takeoverReason || ''
+    })
+    if (!occupyResult.success) {
+      return {
+        success: false,
+        errors: occupyResult.errors,
+        blocked: occupyResult.blocked,
+        reason: occupyResult.reason,
+        versionConflict: occupyResult.conflict
+      }
+    }
+  }
+
   const newDraft = {
     ...JSON.parse(JSON.stringify(sourceDraft)),
     id: genId(),
@@ -393,31 +476,38 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
     updatedAt: now
   }
 
-  if (newDraft.version) {
-    const vr = versionRegistry.occupyVersion(newDraft.version, {
+  const drafts = store.loadDrafts()
+  drafts.push(newDraft)
+
+  try {
+    store.saveDrafts(drafts)
+  } catch (e) {
+    if (sourceDraft.version && occupyResult && occupyResult.success) {
+      versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
+    }
+    return { success: false, errors: [`保存草稿失败: ${e.message}`], blocked: false }
+  }
+
+  if (sourceDraft.version && occupyResult && occupyResult.entry) {
+    const updateResult = versionRegistry.occupyVersion(sourceDraft.version, {
       userId: options.userId,
       userName: options.userName,
       draftId: newDraft.id,
       draftName: newName,
       sourceAction: versionRegistry.SOURCE_DUPLICATE,
-      force: options.force || false,
-      isAdmin: options.isAdmin || false,
-      reason: options.takeoverReason || ''
+      force: true,
+      isAdmin: true
     })
-    if (!vr.success) {
+    if (!updateResult.success) {
+      store.saveDrafts(draftsBefore)
       return {
         success: false,
-        errors: vr.errors,
-        blocked: vr.blocked,
-        reason: vr.reason,
-        versionConflict: vr.conflict
+        errors: updateResult.errors,
+        blocked: updateResult.blocked,
+        reason: updateResult.reason
       }
     }
   }
-
-  const drafts = store.loadDrafts()
-  drafts.push(newDraft)
-  store.saveDrafts(drafts)
 
   store.appendDraftLog({
     action: 'duplicate',
@@ -432,7 +522,7 @@ function _doDuplicateDraft(sourceDraft, newName, options) {
 
   _pushUndoSnapshot('duplicate', newDraft.id, `复制草稿: ${sourceDraft.name} → ${newName}`, null, draftsBefore)
 
-  return { success: true, draft: newDraft }
+  return { success: true, draft: newDraft, versionRegistryEntry: occupyResult ? occupyResult.entry : null, tookOver: occupyResult ? occupyResult.tookOver : false }
 }
 
 function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
@@ -440,21 +530,48 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   const draftsBefore = JSON.parse(JSON.stringify(store.loadDrafts()))
   const now = new Date().toISOString()
 
-  if (sourceDraft.version && sourceDraft.version !== existingDraft.version) {
-    const vr = versionRegistry.updateEntryForDraft(existingDraft.id, targetName, sourceDraft.version, {
-      userId: options.userId,
-      userName: options.userName,
-      force: options.force || false,
-      isAdmin: options.isAdmin || false,
-      reason: options.takeoverReason || ''
-    })
-    if (!vr.success) {
-      return {
-        success: false,
-        errors: vr.errors,
-        blocked: vr.blocked,
-        reason: vr.reason,
-        versionConflict: vr.conflict
+  let occupyResult = null
+  if (sourceDraft.version) {
+    if (sourceDraft.version !== existingDraft.version) {
+      occupyResult = versionRegistry.occupyVersion(sourceDraft.version, {
+        userId: options.userId,
+        userName: options.userName,
+        sourceAction: versionRegistry.SOURCE_DUPLICATE,
+        force: true,
+        isAdmin: options.isAdmin || false,
+        reason: options.takeoverReason || ''
+      })
+      if (!occupyResult.success) {
+        return {
+          success: false,
+          errors: occupyResult.errors,
+          blocked: occupyResult.blocked,
+          reason: occupyResult.reason,
+          versionConflict: occupyResult.conflict
+        }
+      }
+    } else {
+      versionRegistry.releaseVersion(sourceDraft.version, {
+        userId: options.userId,
+        userName: options.userName,
+        reason: '覆盖前释放旧占用'
+      })
+      occupyResult = versionRegistry.occupyVersion(sourceDraft.version, {
+        userId: options.userId,
+        userName: options.userName,
+        sourceAction: versionRegistry.SOURCE_DUPLICATE,
+        force: false,
+        isAdmin: options.isAdmin || false,
+        draftId: existingDraft.id
+      })
+      if (!occupyResult.success) {
+        return {
+          success: false,
+          errors: occupyResult.errors,
+          blocked: occupyResult.blocked,
+          reason: occupyResult.reason,
+          versionConflict: occupyResult.conflict
+        }
       }
     }
   }
@@ -470,10 +587,42 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   const drafts = store.loadDrafts()
   const idx = drafts.findIndex(d => d.id === existingDraft.id)
   if (idx < 0) {
+    if (sourceDraft.version && occupyResult && occupyResult.success) {
+      versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
+    }
     return { success: false, errors: [`目标草稿不存在: ${existingDraft.id}`], blocked: false }
   }
   drafts[idx] = overwrittenDraft
-  store.saveDrafts(drafts)
+
+  try {
+    store.saveDrafts(drafts)
+  } catch (e) {
+    if (sourceDraft.version && occupyResult && occupyResult.success) {
+      versionRegistry.undoLastChange({ userId: options.userId, userName: options.userName })
+    }
+    return { success: false, errors: [`保存草稿失败: ${e.message}`], blocked: false }
+  }
+
+  if (sourceDraft.version && occupyResult && occupyResult.entry) {
+    const updateResult = versionRegistry.occupyVersion(sourceDraft.version, {
+      userId: options.userId,
+      userName: options.userName,
+      draftId: overwrittenDraft.id,
+      draftName: targetName,
+      sourceAction: versionRegistry.SOURCE_DUPLICATE,
+      force: true,
+      isAdmin: true
+    })
+    if (!updateResult.success) {
+      store.saveDrafts(draftsBefore)
+      return {
+        success: false,
+        errors: updateResult.errors,
+        blocked: updateResult.blocked,
+        reason: updateResult.reason
+      }
+    }
+  }
 
   store.appendDraftLog({
     action: 'duplicate_overwrite',
@@ -490,7 +639,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
 
   _pushUndoSnapshot('duplicate_overwrite', overwrittenDraft.id, `覆盖复制草稿: ${sourceDraft.name} → ${targetName}`, existingDraft, draftsBefore)
 
-  return { success: true, draft: overwrittenDraft, overwritten: true }
+  return { success: true, draft: overwrittenDraft, overwritten: true, versionRegistryEntry: occupyResult ? occupyResult.entry : null }
 }
 
 function applyDraft(id) {
@@ -748,18 +897,32 @@ function importDraftFromJson(data, options) {
     }
   }
 
+  if (force && isAdmin && !takeoverReason) {
+    return {
+      success: false,
+      errors: ['管理员强制接管必须提供接管理由'],
+      blocked: true,
+      reason: 'no_takeover_reason'
+    }
+  }
+
+  let occupyResult = null
   if (draftData.version) {
-    const vr = versionRegistry.checkAvailability(draftData.version, { userId })
-    if (!vr.available && !vr.selfOccupied) {
-      if (force && isAdmin) {
-      } else {
-        return {
-          success: false,
-          errors: [`版本号 ${draftData.version} 已被占用: ${vr.occupier}（来源: ${vr.sourceAction || '未知'}，草稿: ${vr.draftName || '(未知)'}）`],
-          blocked: true,
-          reason: 'version_occupied',
-          versionConflict: vr
-        }
+    occupyResult = versionRegistry.occupyVersion(draftData.version, {
+      userId,
+      userName,
+      sourceAction: versionRegistry.SOURCE_IMPORT,
+      force,
+      isAdmin,
+      reason: takeoverReason
+    })
+    if (!occupyResult.success) {
+      return {
+        success: false,
+        errors: occupyResult.errors,
+        blocked: occupyResult.blocked,
+        reason: occupyResult.reason,
+        versionConflict: occupyResult.conflict
       }
     }
   }
@@ -793,19 +956,34 @@ function importDraftFromJson(data, options) {
     drafts.push(newDraft)
   }
 
-  store.saveDrafts(drafts)
+  try {
+    store.saveDrafts(drafts)
+  } catch (e) {
+    if (draftData.version && occupyResult && occupyResult.success) {
+      versionRegistry.undoLastChange({ userId, userName })
+    }
+    return { success: false, errors: [`保存草稿失败: ${e.message}`], blocked: false }
+  }
 
-  if (draftData.version) {
-    versionRegistry.occupyVersion(draftData.version, {
+  if (draftData.version && occupyResult && occupyResult.entry) {
+    const updateResult = versionRegistry.occupyVersion(draftData.version, {
       userId,
       userName,
       draftId: newDraft.id,
       draftName: name,
       sourceAction: versionRegistry.SOURCE_IMPORT,
-      force,
-      isAdmin,
-      reason: takeoverReason
+      force: true,
+      isAdmin: true
     })
+    if (!updateResult.success) {
+      store.saveDrafts(draftsBefore)
+      return {
+        success: false,
+        errors: updateResult.errors,
+        blocked: updateResult.blocked,
+        reason: updateResult.reason
+      }
+    }
   }
 
   store.appendDraftLog({
@@ -822,7 +1000,9 @@ function importDraftFromJson(data, options) {
   return {
     success: true,
     draft: newDraft,
-    overwritten: !!(byName && force)
+    overwritten: !!(byName && force),
+    versionRegistryEntry: occupyResult ? occupyResult.entry : null,
+    tookOver: occupyResult ? occupyResult.tookOver : false
   }
 }
 

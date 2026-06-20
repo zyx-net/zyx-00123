@@ -125,8 +125,8 @@ runTest('复制草稿 - 同版本冲突 (cancel)', () => {
   const list = draft.listDrafts()
   const d1 = list.find(d => d.name === '草稿A')
   const result = draft.duplicateDraft(d1.id, '新名称草稿', { resolve: 'cancel' })
-  if (!result.success && result.blocked && result.reason === 'duplicate_version') {
-    assert(result.conflictDetails.versionConflict, '应该有版本冲突信息')
+  if (!result.success && result.blocked && result.reason === 'version_occupied') {
+    assert(result.versionConflict || result.conflictDetails?.versionConflict, '应该有版本冲突信息')
   }
 })
 
@@ -154,9 +154,10 @@ runTest('复制草稿 - 无冲突时直接成功', () => {
   ])
   const r = currentDraft.createDraft({ name: '无冲突源草稿', version: 'v99.0.0' })
   assert(r.success, '创建无冲突源草稿应该成功')
-  const result = currentDraft.duplicateDraft(r.draft.id, '唯一新名称草稿', { resolve: 'cancel' })
+  const result = currentDraft.duplicateDraft(r.draft.id, '唯一新名称草稿', { resolve: 'cancel', version: 'v99.0.1' })
   assert(result.success, '无冲突复制应该成功: ' + (result.reason || ''))
   assert(!result.overwritten, '不应该标记为覆盖')
+  assert(result.draft.version === 'v99.0.1', '新版本号应该正确')
 })
 
 console.log('\n--- 多级撤销栈测试 ---')
@@ -297,7 +298,7 @@ runTest('撤销复制操作后草稿数量恢复', () => {
   const countBefore = draftsBefore.length
   
   const d = draftsBefore[0]
-  const dupResult = currentDraft.duplicateDraft(d.id, '撤销回归测试草稿')
+  const dupResult = currentDraft.duplicateDraft(d.id, '撤销回归测试草稿', { resolve: 'rename' })
   assert(dupResult.success, '复制应该成功')
   
   const countAfterDup = currentDraft.listDrafts().length

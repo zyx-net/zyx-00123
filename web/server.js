@@ -996,6 +996,17 @@ function startServer(port) {
     }
   })
 
+  console.log('\x1b[36m正在执行版本注册表一致性检查...\x1b[0m')
+  const reconcileResult = versionRegistry.reconcileWithDrafts()
+  if (reconcileResult.fixes && reconcileResult.fixes.length > 0) {
+    console.log(`\x1b[33m版本注册表一致性修复完成，共修复 ${reconcileResult.fixes.length} 处问题:\x1b[0m`)
+    reconcileResult.fixes.forEach((fix, i) => {
+      console.log(`  ${i + 1}. [${fix.type}] ${fix.description}${fix.version ? ' (版本: ' + fix.version + ')' : ''}`)
+    })
+  } else if (reconcileResult.ok) {
+    console.log('\x1b[32m版本注册表一致性检查通过，无需修复\x1b[0m')
+  }
+
   server.listen(port, () => {
     console.log(`\x1b[32m发布说明工具 Web 界面已启动: http://localhost:${port}\x1b[0m`)
   })

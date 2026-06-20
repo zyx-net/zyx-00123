@@ -34,6 +34,21 @@ function yellow(msg) {
   console.log('\x1b[33m' + msg + '\x1b[0m')
 }
 
+const skipReconcileCmds = ['help', 'version', 'config', 'import', 'export']
+const needsReconcile = !skipReconcileCmds.includes(cmd) || 
+  (cmd === 'version' && args[1] !== 'reconcile' && args[1] !== 'list' && args[1] !== 'show') ||
+  (cmd === 'draft' && (args[1] === 'create' || args[1] === 'new' || args[1] === 'duplicate' || args[1] === 'copy' || args[1] === 'import'))
+
+if (needsReconcile && process.env.SKIP_RECONCILE !== '1') {
+  const reconcileResult = versionRegistry.reconcileWithDrafts()
+  if (reconcileResult.fixes && reconcileResult.fixes.length > 0) {
+    yellow(`⚠ 版本注册表一致性修复完成，共修复 ${reconcileResult.fixes.length} 处问题:`)
+    reconcileResult.fixes.forEach((fix, i) => {
+      yellow(`  ${i + 1}. [${fix.type}] ${fix.description}${fix.version ? ' (版本: ' + fix.version + ')' : ''}`)
+    })
+  }
+}
+
 function printCommit(c) {
   const status = c.reviewed ? '✓' : '○'
   const resolved = c.resolved ? '✔' : (c.issues && c.issues.length > 0 ? '✘' : '-')

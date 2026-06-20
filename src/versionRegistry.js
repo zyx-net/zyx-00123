@@ -130,12 +130,54 @@ function occupyVersion(version, options) {
   const registry = _loadRegistry()
   const existing = registry.entries.find(e => e.version === version)
 
+  const storeMod = require('./store')
+  const allDrafts = storeMod.loadDrafts()
+  const duplicateDraft = allDrafts.find(d => d.version === version && d.id !== options.draftId)
+  
+  if (duplicateDraft && !options.force) {
+    if (!existing) {
+      return {
+        success: false,
+        errors: [`版本号 ${version} 已被草稿占用但未在登记表中: ${duplicateDraft.name}`],
+        blocked: true,
+        reason: 'version_orphaned_draft',
+        conflict: {
+          version,
+          occupier: '(未登记)',
+          sourceAction: 'orphaned',
+          draftName: duplicateDraft.name,
+          draftId: duplicateDraft.id,
+          updatedAt: duplicateDraft.updatedAt,
+          needsReconcile: true
+        }
+      }
+    } else if (options.draftId !== duplicateDraft.id) {
+      return {
+        success: false,
+        errors: [`版本号 ${version} 已被草稿占用: ${duplicateDraft.name}`],
+        blocked: true,
+        reason: 'version_occupied',
+        conflict: {
+          version,
+          occupier: existing.userName || existing.userId || '(未知)',
+          sourceAction: existing.sourceAction,
+          draftName: duplicateDraft.name,
+          draftId: duplicateDraft.id,
+          updatedAt: duplicateDraft.updatedAt
+        }
+      }
+    }
+  }
+
   if (existing) {
     if (options.excludeDraftId && existing.draftId === options.excludeDraftId) {
     } else if ((options.userId || 'anonymous') === existing.userId) {
     } else if (options.force && options.isAdmin) {
+      if (!options.reason) {
+        return { success: false, errors: ['管理员强制接管必须提供接管理由'], blocked: true, reason: 'no_takeover_reason' }
+      }
       _saveUndoSnapshot('takeover', version,
-        `管理员强制接管版本 ${version}，理由: ${options.reason || '(未说明)'}`,
+        `管理员强制接管版本 ${version}，理由: ${options.reason}`,
         registry.entries, { previousEntry: existing })
       _appendLog({
         action: 'takeover',
@@ -594,15 +636,73 @@ function importRegistryFromFile(filePath, options) {
 
 function reconcileWithDrafts(drafts) {
   const registry = _loadRegistry()
+  const store = require('./store')
+  const actualDrafts = drafts || store.loadDrafts()
   const draftVersionMap = new Map()
-  drafts.forEach(d => {
+  const duplicateVersions = []
+  
+  actualDrafts.forEach(d => {
     if (d.version) {
-      draftVersionMap.set(d.version, d)
+      if (draftVersionMap.has(d.version)) {
+        duplicateVersions.push({
+          version: d.version,
+          draft1: draftVersionMap.get(d.version),
+          draft2: d
+        })
+      } else {
+        draftVersionMap.set(d.version, d)
+      }
     }
   })
 
   const staleEntries = []
   const missingEntries = []
+  const duplicateFixes = []
+
+  duplicateVersions.forEach(dv => {
+    const newer = dv.draft1.updatedAt > dv.draft2.updatedAt ? dv.draft1 : dv.draft2
+    const older = dv.draft1.updatedAt > dv.draft2.updatedAt ? dv.draft2 : dv.draft1
+    const existingEntry = registry.entries.find(e => e.version === dv.version)
+    
+    if (existingEntry) {
+      if (existingEntry.draftId === older.id) {
+        existingEntry.draftId = newer.id
+        existingEntry.draftName = newer.name
+        existingEntry.updatedAt = _now()
+        existingEntry.history.push({
+          action: 'reconcile_duplicate',
+          timestamp: _now(),
+          userId: 'system',
+          userName: '系统恢复',
+          reason: `重复版本检测，保留较新的草稿 ${newer.name}，旧草稿 ${older.name} 已被清除版本标记`
+        })
+        older.version = ''
+        store.saveDrafts(actualDrafts)
+        duplicateFixes.push({
+          type: 'duplicate_version',
+          version: dv.version,
+          description: `检测到重复版本草稿，保留 ${newer.name}，已清除 ${older.name} 的版本标记`
+        })
+      } else {
+        older.version = ''
+        store.saveDrafts(actualDrafts)
+        duplicateFixes.push({
+          type: 'duplicate_version',
+          version: dv.version,
+          description: `检测到重复版本草稿，保留 ${newer.name}，已清除 ${older.name} 的版本标记`
+        })
+      }
+    } else {
+      older.version = ''
+      store.saveDrafts(actualDrafts)
+      draftVersionMap.set(dv.version, newer)
+      duplicateFixes.push({
+        type: 'duplicate_version',
+        version: dv.version,
+        description: `检测到重复版本草稿，保留 ${newer.name}，已清除 ${older.name} 的版本标记`
+      })
+    }
+  })
 
   registry.entries.forEach(e => {
     if (!draftVersionMap.has(e.version)) {
@@ -650,16 +750,35 @@ function reconcileWithDrafts(drafts) {
 
   _saveRegistry(registry)
 
-  if (staleEntries.length > 0 || missingEntries.length > 0) {
+  const fixes = [...duplicateFixes]
+  staleEntries.forEach(e => {
+    fixes.push({
+      type: 'remove_stale',
+      version: e.version,
+      description: `删除孤立的版本占用记录（草稿已不存在）`
+    })
+  })
+  missingEntries.forEach(m => {
+    fixes.push({
+      type: 'restore_missing',
+      version: m.version,
+      description: `恢复缺失的版本占用记录（草稿 ${m.draft.name}）`
+    })
+  })
+
+  if (fixes.length > 0) {
     _appendLog({
       action: 'reconcile',
       staleRemoved: staleEntries.length,
       missingRestored: missingEntries.length,
-      timestamp: _now()
+      timestamp: _now(),
+      fixes
     })
   }
 
   return {
+    ok: fixes.length === 0,
+    fixes,
     staleRemoved: staleEntries.length,
     missingRestored: missingEntries.length,
     staleVersions: staleEntries.map(e => e.version),
