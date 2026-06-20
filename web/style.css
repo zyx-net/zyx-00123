@@ -719,3 +719,124 @@ button.primary:hover {
     flex-direction: column;
   }
 }
+
+.bench-diff-section {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.bench-diff-header {
+  background: #f9fafb;
+  padding: 10px 14px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bench-diff-header .same-badge {
+  background: #d1fae5;
+  color: #059669;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.bench-diff-header .diff-badge {
+  background: #fef3c7;
+  color: #92400e;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.bench-diff-body {
+  padding: 12px 14px;
+  font-size: 13px;
+}
+
+.bench-diff-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 6px;
+  align-items: flex-start;
+}
+
+.bench-diff-label {
+  color: #6b7280;
+  min-width: 80px;
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.bench-diff-val {
+  flex: 1;
+  word-break: break-all;
+}
+
+.bench-diff-val.changed {
+  background: #fef3c7;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.bench-diff-arrow {
+  color: #9ca3af;
+  font-size: 12px;
+  padding: 0 4px;
+}
+
+.bench-commit-diff {
+  margin-top: 8px;
+}
+
+.bench-commit-diff h4 {
+  font-size: 13px;
+  margin: 8px 0 4px;
+  color: #374151;
+}
+
+.bench-commit-item {
+  font-size: 12px;
+  padding: 3px 0;
+  color: #4b5563;
+}
+
+.bench-commit-item.added {
+  color: #059669;
+}
+
+.bench-commit-item.removed {
+  color: #dc2626;
+}
+
+.bench-commit-item.modified {
+  color: #d97706;
+}
+
+.bench-conflict-warning {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #92400e;
+}
+
+.bench-conflict-options {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bench-conflict-options button {
+  font-size: 13px;
+  padding: 6px 16px;
+}

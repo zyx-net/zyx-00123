@@ -70,6 +70,11 @@ document.querySelectorAll('.tab').forEach(btn => {
       loadDraftLogs()
       peekDraftUndo()
     }
+    if (btn.dataset.tab === 'bench') {
+      benchLoadDrafts()
+      benchRefreshUndo()
+      benchLoadLogs()
+    }
   })
 })
 
@@ -1543,13 +1548,30 @@ async function duplicateDraft(id) {
     return
   }
   try {
-    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/duplicate', 'POST', { newName: trimmedName })
+    const result = await api('/api/drafts/' + encodeURIComponent(id) + '/duplicate', 'POST', { newName: trimmedName, resolve: 'cancel' })
     showResult('draftsResult', '已复制草稿: ' + result.draft.name, 'success')
     loadDrafts()
     loadDraftLogs()
     peekDraftUndo()
   } catch (e) {
-    showResult('draftsResult', '复制失败: ' + e.message, 'error')
+    if (e.message && (e.message.includes('同名') || e.message.includes('同版本'))) {
+      const msg = e.message + '\n\n请选择冲突处理方式:\n- 确定 = 自动改名\n- 取消 = 中止复制'
+      if (confirm(msg)) {
+        try {
+          const result = await api('/api/drafts/' + encodeURIComponent(id) + '/duplicate', 'POST', { newName: trimmedName, resolve: 'rename' })
+          showResult('draftsResult', '已自动改名复制: ' + result.draft.name, 'success')
+          loadDrafts()
+          loadDraftLogs()
+          peekDraftUndo()
+        } catch (e2) {
+          showResult('draftsResult', '复制失败: ' + e2.message, 'error')
+        }
+      } else {
+        showResult('draftsResult', '已取消复制', 'warning')
+      }
+    } else {
+      showResult('draftsResult', '复制失败: ' + e.message, 'error')
+    }
   }
 }
 
@@ -1825,6 +1847,239 @@ async function undoDraftChange() {
     peekDraftUndo()
   } catch (e) {
     showResult('draftsResult', '撤销失败: ' + e.message, 'error')
+  }
+}
+
+let benchDraftsCache = []
+
+async function benchLoadDrafts() {
+  try {
+    const result = await api('/api/drafts', 'GET')
+    benchDraftsCache = result.drafts || []
+    const opts = benchDraftsCache.map(d =>
+      `<option value="${escHtml(d.id)}">${escHtml(d.name)} ${d.version ? '(' + escHtml(d.version) + ')' : ''}</option>`
+    ).join('')
+    const emptyOpt = '<option value="">-- 选择草稿 --</option>'
+    document.getElementById('benchDraft1').innerHTML = emptyOpt + opts
+    document.getElementById('benchDraft2').innerHTML = emptyOpt + opts
+    document.getElementById('benchDupSource').innerHTML = emptyOpt + opts
+  } catch (e) {
+    console.error('加载审校台草稿列表失败:', e)
+  }
+}
+
+async function benchCompare() {
+  const id1 = document.getElementById('benchDraft1').value
+  const id2 = document.getElementById('benchDraft2').value
+  if (!id1 || !id2) {
+    alert('请选择两份草稿进行比对')
+    return
+  }
+  if (id1 === id2) {
+    alert('请选择不同的两份草稿')
+    return
+  }
+  try {
+    const result = await api('/api/drafts/compare', 'POST', { id1, id2 })
+    const diff = result.diff
+    let html = ''
+
+    html += '<div class="bench-diff-section">'
+    html += '<div class="bench-diff-header">基本信息 <span class="' + (benchAllSame(diff) ? 'same-badge' : 'diff-badge') + '">' + (benchAllSame(diff) ? '全部一致' : '存在差异') + '</span></div>'
+    html += '<div class="bench-diff-body">'
+    html += benchDiffRow('名称', diff.name)
+    html += benchDiffRow('版本号', diff.version)
+    html += benchDiffRow('补充说明', diff.description)
+    html += benchDiffRow('提交数', diff.commitCount)
+    html += benchDiffRow('创建时间', diff.createdAt)
+    html += benchDiffRow('更新时间', diff.updatedAt)
+    html += '</div></div>'
+
+    html += '<div class="bench-diff-section">'
+    html += '<div class="bench-diff-header">导出选项 <span class="' + (benchExportSame(diff.exportOptions) ? 'same-badge' : 'diff-badge') + '">' + (benchExportSame(diff.exportOptions) ? '一致' : '差异') + '</span></div>'
+    html += '<div class="bench-diff-body">'
+    html += benchDiffRow('导出方案 ID', diff.exportOptions.profileId)
+    html += benchDiffRow('导出方案名', diff.exportOptions.profileName)
+    html += benchDiffRow('输出目录', diff.exportOptions.outputDir)
+    html += '</div></div>'
+
+    const c = diff.commits
+    html += '<div class="bench-diff-section">'
+    html += '<div class="bench-diff-header">提交差异 <span class="' + (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0 ? 'same-badge' : 'diff-badge') + '">' + (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0 ? '一致' : '差异') + '</span></div>'
+    html += '<div class="bench-diff-body bench-commit-diff">'
+    if (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0) {
+      html += '<p style="color:#27ae60">提交内容完全一致</p>'
+    } else {
+      if (c.added.length > 0) {
+        html += '<h4>B 新增 (' + c.added.length + ')</h4>'
+        c.added.forEach(cm => {
+          html += '<div class="bench-commit-item added">+ ' + shortId(cm.id) + ' ' + escHtml(cm.message) + '</div>'
+        })
+      }
+      if (c.removed.length > 0) {
+        html += '<h4>A 独有 (' + c.removed.length + ')</h4>'
+        c.removed.forEach(cm => {
+          html += '<div class="bench-commit-item removed">- ' + shortId(cm.id) + ' ' + escHtml(cm.message) + '</div>'
+        })
+      }
+      if (c.modified.length > 0) {
+        html += '<h4>已修改 (' + c.modified.length + ')</h4>'
+        c.modified.forEach(cm => {
+          html += '<div class="bench-commit-item modified">~ ' + shortId(cm.id) + ': '
+          cm.changes.forEach(ch => {
+            html += escHtml(ch.field) + ' '
+          })
+          html += '</div>'
+        })
+      }
+      if (c.unchanged > 0) {
+        html += '<p style="color:#999;font-size:12px;margin-top:8px">未变更提交: ' + c.unchanged + ' 条</p>'
+      }
+    }
+    html += '</div></div>'
+
+    if (diff.rules && !diff.rules.same) {
+      html += '<div class="bench-diff-section">'
+      html += '<div class="bench-diff-header">规则差异 <span class="diff-badge">差异</span></div>'
+      html += '<div class="bench-diff-body">'
+      diff.rules.changes.forEach(ch => {
+        html += benchDiffRow(ch.field, { same: false, value1: JSON.stringify(ch.value1), value2: JSON.stringify(ch.value2) })
+      })
+      html += '</div></div>'
+    }
+
+    document.getElementById('benchDiffResult').innerHTML = html
+  } catch (e) {
+    document.getElementById('benchDiffResult').innerHTML = '<p style="color:#e74c3c">对比失败: ' + escHtml(e.message) + '</p>'
+  }
+}
+
+function benchDiffRow(label, item) {
+  if (item.same) {
+    return '<div class="bench-diff-row"><span class="bench-diff-label">' + escHtml(label) + '</span><span class="bench-diff-val">' + escHtml(String(item.value1 || item.value2 || '(空)')) + '</span></div>'
+  }
+  return '<div class="bench-diff-row"><span class="bench-diff-label">' + escHtml(label) + '</span><span class="bench-diff-val changed">' + escHtml(String(item.value1 || '(空)')) + '</span><span class="bench-diff-arrow">→</span><span class="bench-diff-val changed">' + escHtml(String(item.value2 || '(空)')) + '</span></div>'
+}
+
+function benchAllSame(diff) {
+  return diff.name.same && diff.version.same && diff.description.same && diff.commitCount.same
+}
+
+function benchExportSame(eo) {
+  return eo.profileId.same && eo.profileName.same && eo.outputDir.same
+}
+
+async function benchDuplicate() {
+  const sourceId = document.getElementById('benchDupSource').value
+  if (!sourceId) {
+    alert('请选择源草稿')
+    return
+  }
+  const newName = document.getElementById('benchDupName').value.trim()
+  const resolve = document.getElementById('benchDupResolve').value
+
+  try {
+    const body = { newName: newName || undefined, resolve }
+    const result = await api('/api/drafts/' + encodeURIComponent(sourceId) + '/duplicate', 'POST', body)
+    if (result.overwritten) {
+      showResult('benchDupResult', '已覆盖复制: ' + result.draft.name, 'success')
+    } else {
+      showResult('benchDupResult', '已复制草稿: ' + result.draft.name, 'success')
+    }
+    benchLoadDrafts()
+    benchRefreshUndo()
+    benchLoadLogs()
+  } catch (e) {
+    const errEl = document.getElementById('benchDupResult')
+    if (e.message && (e.message.includes('同名') || e.message.includes('同版本'))) {
+      errEl.className = 'result-box warning'
+      let html = '<div class="bench-conflict-warning">\u26A0 冲突检测: ' + escHtml(e.message)
+      html += '<div class="bench-conflict-options">'
+      html += '<button onclick="benchDuplicateResolve(\'overwrite\')" class="secondary">覆盖同名</button>'
+      html += '<button onclick="benchDuplicateResolve(\'rename\')" class="secondary">自动改名</button>'
+      html += '<button onclick="benchDuplicateResolve(\'cancel\')" class="danger">取消</button>'
+      html += '</div></div>'
+      errEl.innerHTML = html
+      errEl.classList.remove('hidden')
+    } else {
+      showResult('benchDupResult', '复制失败: ' + e.message, 'error')
+    }
+  }
+}
+
+async function benchDuplicateResolve(resolve) {
+  const sourceId = document.getElementById('benchDupSource').value
+  const newName = document.getElementById('benchDupName').value.trim()
+  try {
+    const body = { newName: newName || undefined, resolve }
+    const result = await api('/api/drafts/' + encodeURIComponent(sourceId) + '/duplicate', 'POST', body)
+    if (result.overwritten) {
+      showResult('benchDupResult', '已覆盖复制: ' + result.draft.name, 'success')
+    } else {
+      showResult('benchDupResult', '已复制草稿: ' + result.draft.name, 'success')
+    }
+    benchLoadDrafts()
+    benchRefreshUndo()
+    benchLoadLogs()
+  } catch (e) {
+    showResult('benchDupResult', '复制失败: ' + e.message, 'error')
+  }
+}
+
+async function benchRefreshUndo() {
+  try {
+    const snap = await api('/api/drafts/undo/peek', 'GET')
+    const sizeResult = await api('/api/drafts/undo/size', 'GET')
+    const el = document.getElementById('benchUndoInfo')
+    if (!snap || !snap.description) {
+      el.textContent = '没有可撤销的草稿操作 (栈深度: ' + sizeResult.size + ')'
+      el.style.color = '#999'
+    } else {
+      el.textContent = '可撤销: ' + snap.description + ' (' + snap.timestamp + ') [栈深度: ' + sizeResult.size + ']'
+      el.style.color = '#333'
+    }
+  } catch {
+    document.getElementById('benchUndoInfo').textContent = '加载失败'
+  }
+}
+
+async function benchUndo() {
+  if (!confirm('确定撤销最近一次草稿操作？')) return
+  try {
+    const result = await api('/api/drafts/undo', 'POST')
+    let msg = '已撤销'
+    if (result.description) msg += ': ' + result.description
+    showResult('benchResult', msg, 'success')
+    benchLoadDrafts()
+    benchRefreshUndo()
+    benchLoadLogs()
+  } catch (e) {
+    showResult('benchResult', '撤销失败: ' + e.message, 'error')
+  }
+}
+
+async function benchLoadLogs() {
+  try {
+    const result = await api('/api/drafts/logs?limit=20', 'GET')
+    const logs = result.logs || []
+    const el = document.getElementById('benchLogsList')
+    if (logs.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无操作日志</p>'
+      return
+    }
+    const actionLabels = { create: '创建', update: '更新', delete: '删除', duplicate: '复制', duplicate_overwrite: '覆盖复制', apply: '应用', archive: '归档', undo: '撤销', import: '导入', export: '导出' }
+    el.innerHTML = logs.map(l => {
+      const lbl = actionLabels[l.action] || l.action
+      return `
+        <div class="log-item">
+          <span class="log-action">[${lbl}]</span>
+          <span class="log-name">${escHtml(l.draftName || l.description || '')}</span>
+          <span class="log-time">${escHtml(l.timestamp || '')}</span>
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    document.getElementById('benchLogsList').innerHTML = '<p style="color:#e74c3c">加载日志失败</p>'
   }
 }
 

@@ -583,7 +583,9 @@ async function handleApi(req, res, pathname) {
     const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/duplicate'.length)
     const body = await parseBody(req)
     try {
-      const result = draft.duplicateDraft(id, body.newName)
+      const opts = {}
+      if (body.resolve) opts.resolve = body.resolve
+      const result = draft.duplicateDraft(id, body.newName, opts)
       if (!result.success && result.errors && result.errors.length > 0) {
         return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
       }
@@ -701,6 +703,22 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/drafts/undo/peek' && method === 'GET') {
     try {
       return sendJson(res, draft.peekUndo())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/undo/size' && method === 'GET') {
+    try {
+      return sendJson(res, { size: draft.undoStackSize() })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/undo/stack' && method === 'GET') {
+    try {
+      return sendJson(res, { stack: draft.peekUndoStack() })
     } catch (e) {
       return sendError(res, e.message)
     }

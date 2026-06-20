@@ -10,7 +10,7 @@ const config = require('../src/config')
 const TEST_DATA_DIR = path.join(__dirname, '..', 'data')
 
 function cleanTestData() {
-  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'undo', 'config']
+  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'draft_undo_stack', 'undo', 'config']
   files.forEach(f => {
     const fp = path.join(TEST_DATA_DIR, `${f}.json`)
     if (fs.existsSync(fp)) {

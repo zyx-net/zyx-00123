@@ -146,6 +146,7 @@ function printHelp() {
       选项同 create，另加 --name <newName> 可重命名
     draft delete <name|id>              删除草稿
     draft duplicate <name|id> [newName]  复制草稿
+      可选: --resolve <cancel|rename|overwrite>  冲突处理策略 (默认 cancel)
     draft apply <name|id>               应用草稿到工作区
     draft archive <name|id>             从草稿一键归档
     draft export <name|id> [outputPath]  导出草稿为 JSON
@@ -153,6 +154,8 @@ function printHelp() {
       可选: --name <customName>        导入时重命名
       可选: --force                     同名/同版本时覆盖
     draft compare <id1|name1> <id2|name2>  比较两个草稿的差异
+    draft bench <id1|name1> <id2|name2>  审校台: 比较、复制、确认一条链路
+      可选: --resolve <cancel|rename|overwrite>  复制冲突处理策略
     draft logs [n]                      查看最近 n 条草稿操作日志 (默认 10)
     draft undo                          撤销最近一次草稿操作
     draft undo-peek                     查看可撤销的草稿操作
@@ -1089,16 +1092,37 @@ function run() {
       } else if (sub === 'duplicate') {
         const ident = args[2]
         const newName = args[3]
-        if (!ident) { err('用法: draft duplicate <name|id> [newName]'); break }
+        if (!ident) { err('用法: draft duplicate <name|id> [newName] [--resolve cancel|rename|overwrite]'); break }
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
-          const result = draft.duplicateDraft(resolved.id, newName)
+          const resolveIdx = args.indexOf('--resolve')
+          const resolve = resolveIdx >= 0 && args[resolveIdx + 1] ? args[resolveIdx + 1] : 'cancel'
+          if (!['cancel', 'rename', 'overwrite'].includes(resolve)) {
+            err('--resolve 只能是 cancel、rename 或 overwrite')
+            break
+          }
+          const result = draft.duplicateDraft(resolved.id, newName, { resolve })
           printResultLogs(result)
           if (result.success) {
-            ok(`已复制草稿: ${resolved.draft.name} → ${result.draft.name} (${result.draft.id})`)
+            if (result.overwritten) {
+              yellow(`已覆盖复制: ${resolved.draft.name} → ${result.draft.name} (${result.draft.id})`)
+            } else {
+              ok(`已复制草稿: ${resolved.draft.name} → ${result.draft.name} (${result.draft.id})`)
+            }
           } else {
             err('复制失败')
+            if (result.blocked) {
+              if (result.conflictDetails) {
+                if (result.conflictDetails.nameConflict) {
+                  yellow(`  同名冲突: ${result.conflictDetails.nameConflict.existingName} (${result.conflictDetails.nameConflict.existingId})`)
+                }
+                if (result.conflictDetails.versionConflict) {
+                  yellow(`  同版本冲突: ${result.conflictDetails.versionConflict.existingVersion} (${result.conflictDetails.versionConflict.existingName})`)
+                }
+              }
+              yellow('提示: 使用 --resolve rename 自动改名, 或 --resolve overwrite 覆盖同名草稿')
+            }
           }
         } catch (e) {
           err(`复制失败: ${e.message}`)
@@ -1229,6 +1253,21 @@ function run() {
           out(`  版本: ${diff.version.same ? '[一致]' : '[差异]'} ${diff.version.value1 || '(空)'} → ${diff.version.value2 || '(空)'}`)
           out(`  描述: ${diff.description.same ? '[一致]' : '[差异]'}`)
           out(`  提交数: ${diff.commitCount.same ? '[一致]' : '[差异]'} ${diff.commitCount.value1} → ${diff.commitCount.value2}`)
+
+          out('')
+          out('  导出选项:')
+          const eo = diff.exportOptions
+          out(`    方案ID: ${eo.profileId.same ? '[一致]' : '[差异]'} ${eo.profileId.value1 || '(空)'} → ${eo.profileId.value2 || '(空)'}`)
+          out(`    方案名: ${eo.profileName.same ? '[一致]' : '[差异]'} ${eo.profileName.value1 || '(空)'} → ${eo.profileName.value2 || '(空)'}`)
+          out(`    输出目录: ${eo.outputDir.same ? '[一致]' : '[差异]'} ${eo.outputDir.value1 || '(空)'} → ${eo.outputDir.value2 || '(空)'}`)
+
+          if (diff.rules && !diff.rules.same) {
+            out('')
+            yellow('  规则差异:')
+            diff.rules.changes.forEach(ch => {
+              out(`    ${ch.field}: ${JSON.stringify(ch.value1)} → ${JSON.stringify(ch.value2)}`)
+            })
+          }
           out('')
           const c = diff.commits
           if (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0) {
@@ -1297,9 +1336,110 @@ function run() {
           yellow('没有可撤销的草稿操作')
         } else {
           out(`可撤销: ${peek.description} (${peek.timestamp})`)
+          out(`  撤销栈深度: ${draft.undoStackSize()}`)
+        }
+      } else if (sub === 'bench') {
+        const ident1 = args[2]
+        const ident2 = args[3]
+        if (!ident1 || !ident2) { err('用法: draft bench <id1|name1> <id2|name2> [--resolve cancel|rename|overwrite]'); break }
+        const r1 = resolveDraftIdentifier(ident1)
+        const r2 = resolveDraftIdentifier(ident2)
+        if (!r1) { err(`草稿不存在: ${ident1}`); break }
+        if (!r2) { err(`草稿不存在: ${ident2}`); break }
+
+        ok('\n=== 发布草稿审校台 ===\n')
+        out(`草稿 A: ${r1.draft.name} (ID: ${r1.draft.id}, 版本: ${r1.draft.version || '(无)'})`)
+        out(`草稿 B: ${r2.draft.name} (ID: ${r2.draft.id}, 版本: ${r2.draft.version || '(无)'})`)
+        out('')
+
+        try {
+          const result = draft.compareDrafts(r1.id, r2.id)
+          if (!result.success) {
+            err('对比失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+            break
+          }
+          const diff = result.diff
+
+          out('--- 差异比对 ---')
+          out(`  名称: ${diff.name.same ? '[一致]' : '[差异]'} ${diff.name.value1} → ${diff.name.value2}`)
+          out(`  版本: ${diff.version.same ? '[一致]' : '[差异]'} ${diff.version.value1 || '(空)'} → ${diff.version.value2 || '(空)'}`)
+          out(`  描述: ${diff.description.same ? '[一致]' : '[差异]'}`)
+          out(`  提交数: ${diff.commitCount.same ? '[一致]' : '[差异]'} ${diff.commitCount.value1} → ${diff.commitCount.value2}`)
+
+          out('  导出选项:')
+          const eo = diff.exportOptions
+          out(`    方案ID: ${eo.profileId.same ? '[一致]' : '[差异]'} ${eo.profileId.value1 || '(空)'} → ${eo.profileId.value2 || '(空)'}`)
+          out(`    方案名: ${eo.profileName.same ? '[一致]' : '[差异]'} ${eo.profileName.value1 || '(空)'} → ${eo.profileName.value2 || '(空)'}`)
+          out(`    输出目录: ${eo.outputDir.same ? '[一致]' : '[差异]'} ${eo.outputDir.value1 || '(空)'} → ${eo.outputDir.value2 || '(空)'}`)
+
+          if (diff.rules && !diff.rules.same) {
+            yellow('  规则差异:')
+            diff.rules.changes.forEach(ch => {
+              out(`    ${ch.field}: ${JSON.stringify(ch.value1)} → ${JSON.stringify(ch.value2)}`)
+            })
+          }
+
+          out('')
+          const c = diff.commits
+          if (c.added.length === 0 && c.removed.length === 0 && c.modified.length === 0) {
+            ok('  提交内容完全一致')
+          } else {
+            if (c.added.length > 0) {
+              yellow(`  B 新增提交 (${c.added.length}):`)
+              c.added.forEach(cm => out(`    + ${cm.id.substring(0, 8)} ${cm.message}`))
+            }
+            if (c.removed.length > 0) {
+              yellow(`  A 独有提交 (${c.removed.length}):`)
+              c.removed.forEach(cm => out(`    - ${cm.id.substring(0, 8)} ${cm.message}`))
+            }
+            if (c.modified.length > 0) {
+              yellow(`  修改提交 (${c.modified.length}):`)
+              c.modified.forEach(cm => {
+                out(`    ~ ${cm.id.substring(0, 8)}:`)
+                cm.changes.forEach(ch => {
+                  out(`       ${ch.field}: ${JSON.stringify(ch.value1)} → ${JSON.stringify(ch.value2)}`)
+                })
+              })
+            }
+          }
+
+          out('')
+          out('--- 复制操作 ---')
+          const resolveIdx = args.indexOf('--resolve')
+          const resolve = resolveIdx >= 0 && args[resolveIdx + 1] ? args[resolveIdx + 1] : 'cancel'
+          if (!['cancel', 'rename', 'overwrite'].includes(resolve)) {
+            err('--resolve 只能是 cancel、rename 或 overwrite')
+            break
+          }
+          out(`  冲突策略: ${resolve}`)
+          const dupResult = draft.duplicateDraft(r1.id, `${r1.draft.name} (审校副本)`, { resolve })
+          if (dupResult.success) {
+            if (dupResult.overwritten) {
+              yellow(`  已覆盖复制: ${r1.draft.name} → ${dupResult.draft.name} (${dupResult.draft.id})`)
+            } else {
+              ok(`  已复制: ${r1.draft.name} → ${dupResult.draft.name} (${dupResult.draft.id})`)
+            }
+          } else {
+            if (dupResult.blocked) {
+              yellow('  复制被冲突阻止:')
+              dupResult.errors.forEach(e => yellow(`    ⚠ ${e}`))
+              out('  提示: 使用 --resolve rename 或 --resolve overwrite 解决冲突')
+            } else {
+              err('  复制失败:')
+              dupResult.errors.forEach(e => err(`    ✗ ${e}`))
+            }
+          }
+
+          out('')
+          ok('--- 审校完成 ---')
+          out(`  撤销栈深度: ${draft.undoStackSize()}`)
+          out('  使用 "rn draft undo" 可撤销最近操作')
+        } catch (e) {
+          err(`审校失败: ${e.message}`)
         }
       } else {
-        err('未知 draft 子命令。使用: list | show | create | update | delete | duplicate | apply | archive | export | import | compare | logs | undo | undo-peek')
+        err('未知 draft 子命令。使用: list | show | create | update | delete | duplicate | apply | archive | export | import | compare | bench | logs | undo | undo-peek')
       }
       break
     }

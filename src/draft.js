@@ -231,31 +231,85 @@ function deleteDraft(id) {
   return { success: true, deleted }
 }
 
-function duplicateDraft(id, newName) {
-  const draft = getDraft(id)
-  if (!draft) {
+function duplicateDraft(id, newName, options) {
+  options = options || {}
+  const resolve = options.resolve || 'cancel'
+
+  const draftObj = getDraft(id)
+  if (!draftObj) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
   }
 
-  const name = newName || `${draft.name} (副本)`
+  const name = newName || `${draftObj.name} (副本)`
 
   const byName = findDuplicateName(name)
-  if (byName) {
-    return {
-      success: false,
-      errors: [`同名草稿已存在: ${name}`],
-      blocked: true,
-      reason: 'duplicate_name',
-      existingId: byName.id
+  const byVersion = draftObj.version ? findDuplicateVersion(draftObj.version, draftObj.id) : null
+
+  if (byName || byVersion) {
+    if (resolve === 'cancel') {
+      const errors = []
+      let reason = ''
+      let existingId = null
+      if (byName) {
+        errors.push(`同名草稿已存在: ${name}`)
+        reason = 'duplicate_name'
+        existingId = byName.id
+      }
+      if (byVersion && byVersion.id !== (byName ? byName.id : null)) {
+        errors.push(`同版本号草稿已存在: ${draftObj.version} (${byVersion.name})`)
+        reason = 'duplicate_version'
+        existingId = byVersion.id
+      } else if (byVersion && !byName) {
+        errors.push(`同版本号草稿已存在: ${draftObj.version} (${byVersion.name})`)
+        reason = 'duplicate_version'
+        existingId = byVersion.id
+      }
+      return {
+        success: false,
+        errors,
+        blocked: true,
+        reason,
+        existingId,
+        conflictDetails: {
+          nameConflict: byName ? { existingId: byName.id, existingName: byName.name } : null,
+          versionConflict: byVersion ? { existingId: byVersion.id, existingVersion: draftObj.version, existingName: byVersion.name } : null
+        }
+      }
+    }
+
+    if (resolve === 'rename') {
+      let finalName = name
+      let suffix = 1
+      while (findDuplicateName(finalName)) {
+        suffix++
+        finalName = `${name} (${suffix})`
+      }
+      return _doDuplicateDraft(draftObj, finalName)
+    }
+
+    if (resolve === 'overwrite') {
+      if (!byName) {
+        return {
+          success: false,
+          errors: ['覆盖模式需要指定已存在的同名草稿'],
+          blocked: true,
+          reason: 'no_name_match'
+        }
+      }
+      return _doOverwriteDraft(draftObj, name, byName)
     }
   }
 
+  return _doDuplicateDraft(draftObj, name)
+}
+
+function _doDuplicateDraft(sourceDraft, newName) {
   const draftsBefore = store.loadDrafts()
   const now = new Date().toISOString()
   const newDraft = {
-    ...JSON.parse(JSON.stringify(draft)),
+    ...JSON.parse(JSON.stringify(sourceDraft)),
     id: genId(),
-    name,
+    name: newName,
     createdAt: now,
     updatedAt: now
   }
@@ -267,16 +321,52 @@ function duplicateDraft(id, newName) {
   store.appendDraftLog({
     action: 'duplicate',
     draftId: newDraft.id,
-    draftName: name,
-    sourceDraftId: id,
-    sourceDraftName: draft.name,
+    draftName: newName,
+    sourceDraftId: sourceDraft.id,
+    sourceDraftName: sourceDraft.name,
     timestamp: now,
-    description: `复制草稿: ${draft.name} → ${name}`
+    description: `复制草稿: ${sourceDraft.name} → ${newName}`
   })
 
-  _saveUndoSnapshot('duplicate', newDraft.id, `复制草稿: ${draft.name} → ${name}`, null, draftsBefore)
+  _pushUndoSnapshot('duplicate', newDraft.id, `复制草稿: ${sourceDraft.name} → ${newName}`, null, draftsBefore)
 
   return { success: true, draft: newDraft }
+}
+
+function _doOverwriteDraft(sourceDraft, targetName, existingDraft) {
+  const draftsBefore = JSON.parse(JSON.stringify(store.loadDrafts()))
+  const now = new Date().toISOString()
+  const overwrittenDraft = {
+    ...JSON.parse(JSON.stringify(sourceDraft)),
+    id: existingDraft.id,
+    name: targetName,
+    createdAt: existingDraft.createdAt,
+    updatedAt: now
+  }
+
+  const drafts = store.loadDrafts()
+  const idx = drafts.findIndex(d => d.id === existingDraft.id)
+  if (idx < 0) {
+    return { success: false, errors: [`目标草稿不存在: ${existingDraft.id}`], blocked: false }
+  }
+  drafts[idx] = overwrittenDraft
+  store.saveDrafts(drafts)
+
+  store.appendDraftLog({
+    action: 'duplicate_overwrite',
+    draftId: overwrittenDraft.id,
+    draftName: targetName,
+    sourceDraftId: sourceDraft.id,
+    sourceDraftName: sourceDraft.name,
+    overwrittenDraftId: existingDraft.id,
+    overwrittenDraftName: existingDraft.name,
+    timestamp: now,
+    description: `覆盖复制草稿: ${sourceDraft.name} → ${targetName} (覆盖 ${existingDraft.name})`
+  })
+
+  _pushUndoSnapshot('duplicate_overwrite', overwrittenDraft.id, `覆盖复制草稿: ${sourceDraft.name} → ${targetName}`, existingDraft, draftsBefore)
+
+  return { success: true, draft: overwrittenDraft, overwritten: true }
 }
 
 function applyDraft(id) {
@@ -361,6 +451,9 @@ function compareDrafts(id1, id2) {
   if (!d1) return { success: false, errors: [`草稿不存在: ${id1}`] }
   if (!d2) return { success: false, errors: [`草稿不存在: ${id2}`] }
 
+  const eo1 = d1.exportOptions || {}
+  const eo2 = d2.exportOptions || {}
+
   const diff = {
     name: { same: d1.name === d2.name, value1: d1.name, value2: d2.name },
     version: { same: d1.version === d2.version, value1: d1.version, value2: d2.version },
@@ -368,12 +461,25 @@ function compareDrafts(id1, id2) {
     commitCount: { same: d1.commits.length === d2.commits.length, value1: d1.commits.length, value2: d2.commits.length },
     commits: _diffCommits(d1.commits, d2.commits),
     exportOptions: {
+      profileId: {
+        same: (eo1.profileId || null) === (eo2.profileId || null),
+        value1: eo1.profileId || null,
+        value2: eo2.profileId || null
+      },
       profileName: {
-        same: (d1.exportOptions?.profileName || null) === (d2.exportOptions?.profileName || null),
-        value1: d1.exportOptions?.profileName || null,
-        value2: d2.exportOptions?.profileName || null
+        same: (eo1.profileName || null) === (eo2.profileName || null),
+        value1: eo1.profileName || null,
+        value2: eo2.profileName || null
+      },
+      outputDir: {
+        same: (eo1.outputDir || null) === (eo2.outputDir || null),
+        value1: eo1.outputDir || null,
+        value2: eo2.outputDir || null
       }
-    }
+    },
+    rules: _diffRules(d1.rules, d2.rules),
+    createdAt: { same: d1.createdAt === d2.createdAt, value1: d1.createdAt, value2: d2.createdAt },
+    updatedAt: { same: d1.updatedAt === d2.updatedAt, value1: d1.updatedAt, value2: d2.updatedAt }
   }
 
   return { success: true, diff, draft1: d1, draft2: d2 }
@@ -422,6 +528,19 @@ function _diffCommitFields(c1, c2) {
     }
   })
   return changes
+}
+
+function _diffRules(r1, r2) {
+  if (!r1 && !r2) return { same: true, changes: [] }
+  if (!r1 || !r2) return { same: false, changes: [{ field: 'rules', value1: r1, value2: r2 }] }
+  const changes = []
+  const allKeys = new Set([...Object.keys(r1), ...Object.keys(r2)])
+  allKeys.forEach(k => {
+    if (JSON.stringify(r1[k]) !== JSON.stringify(r2[k])) {
+      changes.push({ field: k, value1: r1[k], value2: r2[k] })
+    }
+  })
+  return { same: changes.length === 0, changes }
 }
 
 function exportDraftToJson(id) {
@@ -583,7 +702,9 @@ function listLogs(limit) {
   return logs.slice(-n).reverse()
 }
 
-function _saveUndoSnapshot(action, draftId, description, extraData, draftsBefore) {
+const MAX_UNDO_STACK = 20
+
+function _pushUndoSnapshot(action, draftId, description, extraData, draftsBefore) {
   const snapshot = {
     action,
     draftId,
@@ -592,23 +713,34 @@ function _saveUndoSnapshot(action, draftId, description, extraData, draftsBefore
     draftsSnapshot: draftsBefore ? JSON.parse(JSON.stringify(draftsBefore)) : JSON.parse(JSON.stringify(store.loadDrafts())),
     extraData: extraData ? JSON.parse(JSON.stringify(extraData)) : null
   }
-  store.saveDraftUndo(snapshot)
+  const stack = store.loadDraftUndoStack()
+  stack.push(snapshot)
+  if (stack.length > MAX_UNDO_STACK) {
+    stack.splice(0, stack.length - MAX_UNDO_STACK)
+  }
+  store.saveDraftUndoStack(stack)
+}
+
+function _saveUndoSnapshot(action, draftId, description, extraData, draftsBefore) {
+  _pushUndoSnapshot(action, draftId, description, extraData, draftsBefore)
 }
 
 function peekUndo() {
-  return store.loadDraftUndo()
+  const stack = store.loadDraftUndoStack()
+  if (stack.length === 0) return null
+  return stack[stack.length - 1]
 }
 
 function undoLastChange() {
-  const snap = store.loadDraftUndo()
-  if (!snap) {
+  const stack = store.loadDraftUndoStack()
+  if (stack.length === 0) {
     return { success: false, reason: '没有可撤销的草稿操作' }
   }
 
+  const snap = stack.pop()
   const currentDrafts = store.loadDrafts()
   store.saveDrafts(snap.draftsSnapshot)
-
-  store.clearDraftUndo()
+  store.saveDraftUndoStack(stack)
 
   const now = new Date().toISOString()
   store.appendDraftLog({
@@ -624,6 +756,14 @@ function undoLastChange() {
     description: snap.description,
     timestamp: snap.timestamp
   }
+}
+
+function undoStackSize() {
+  return store.loadDraftUndoStack().length
+}
+
+function peekUndoStack() {
+  return store.loadDraftUndoStack()
 }
 
 module.exports = {
@@ -643,5 +783,7 @@ module.exports = {
   importDraftFromFile,
   listLogs,
   peekUndo,
-  undoLastChange
+  undoLastChange,
+  undoStackSize,
+  peekUndoStack
 }

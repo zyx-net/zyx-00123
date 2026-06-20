@@ -261,6 +261,21 @@ function clearDraftUndo() {
   }
 }
 
+function loadDraftUndoStack() {
+  return load('draft_undo_stack') || []
+}
+
+function saveDraftUndoStack(stack) {
+  save('draft_undo_stack', stack)
+}
+
+function clearDraftUndoStack() {
+  const fp = filePath('draft_undo_stack')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -297,6 +312,9 @@ module.exports = {
   loadDraftUndo,
   saveDraftUndo,
   clearDraftUndo,
+  loadDraftUndoStack,
+  saveDraftUndoStack,
+  clearDraftUndoStack,
   DATA_DIR,
   BACKUPS_DIR
 }
