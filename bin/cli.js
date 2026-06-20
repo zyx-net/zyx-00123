@@ -15,6 +15,7 @@ const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
 const versionRegistry = require('../src/versionRegistry')
 const draftVault = require('../src/draftVault')
+const operationAudit = require('../src/operationAudit')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -1247,25 +1248,7 @@ function run() {
         }
       } else if (sub === 'apply') {
         const ident = args[2]
-        if (!ident) { err('用法: draft apply <name|id>'); break }
-        const resolved = resolveDraftIdentifier(ident)
-        if (!resolved) { err(`草稿不存在: ${ident}`); break }
-        try {
-          const result = draft.applyDraft(resolved.id)
-          printResultLogs(result)
-          if (result.success) {
-            ok(`已应用草稿: ${result.draft.name}`)
-            out(`  之前提交数: ${result.previousCommitCount}`)
-            out(`  应用后提交数: ${result.appliedCommitCount}`)
-          } else {
-            err('应用失败')
-          }
-        } catch (e) {
-          err(`应用失败: ${e.message}`)
-        }
-      } else if (sub === 'archive') {
-        const ident = args[2]
-        if (!ident) { err('用法: draft archive <name|id>'); break }
+        if (!ident) { err('用法: draft apply <name|id> [--user <name>]'); break }
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
@@ -1275,12 +1258,56 @@ function run() {
             opts.userId = args[userIdx + 1]
             opts.userName = args[userIdx + 1]
           }
+          if (opts.userId) {
+            opts._auditContext = {
+              entry: operationAudit.ENTRY_CLI,
+              userId: opts.userId,
+              userName: opts.userName || opts.userId,
+              sessionId: process.env.SESSION_ID || null,
+              requestId: null
+            }
+          }
+          const result = draft.applyDraft(resolved.id, opts)
+          printResultLogs(result)
+          if (result.success) {
+            ok(`已应用草稿: ${result.draft.name}`)
+            out(`  之前提交数: ${result.previousCommitCount}`)
+            out(`  应用后提交数: ${result.appliedCommitCount}`)
+            if (result._auditRecordId) out(`  审计记录: ${result._auditRecordId}`)
+          } else {
+            err('应用失败')
+          }
+        } catch (e) {
+          err(`应用失败: ${e.message}`)
+        }
+      } else if (sub === 'archive') {
+        const ident = args[2]
+        if (!ident) { err('用法: draft archive <name|id> [--user <name>]'); break }
+        const resolved = resolveDraftIdentifier(ident)
+        if (!resolved) { err(`草稿不存在: ${ident}`); break }
+        try {
+          const userIdx = args.indexOf('--user')
+          const opts = {}
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          if (opts.userId) {
+            opts._auditContext = {
+              entry: operationAudit.ENTRY_CLI,
+              userId: opts.userId,
+              userName: opts.userName || opts.userId,
+              sessionId: process.env.SESSION_ID || null,
+              requestId: null
+            }
+          }
           const result = draft.archiveDraft(resolved.id, opts)
           printResultLogs(result)
           if (result.success) {
             ok(`已从草稿归档: ${result.draft.version}`)
             out(`  提交数: ${result.snapshot.commitCount}`)
             out(`  版本占用已释放`)
+            if (result._auditRecordId) out(`  审计记录: ${result._auditRecordId}`)
           } else {
             err('归档失败')
           }
@@ -1331,6 +1358,15 @@ function run() {
             opts.userName = args[userIdx + 1]
           }
           if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
+          if (opts.userId) {
+            opts._auditContext = {
+              entry: operationAudit.ENTRY_CLI,
+              userId: opts.userId,
+              userName: opts.userName || opts.userId,
+              sessionId: process.env.SESSION_ID || null,
+              requestId: null
+            }
+          }
           let result
           let isFile = false
           if (fs.existsSync(target)) {
@@ -2123,6 +2159,209 @@ function run() {
         }
       } else {
         err('未知 vault 子命令。使用: status|snapshots|show|commit|recover|rollback|archive|clean|pending|recover-pending|undo-recovery|undo-recovery-peek|resolve|export|import|logs')
+      }
+      break
+    }
+
+    case 'audit': {
+      const sub = args[1]
+      if (!sub) { err('用法: audit status|records|show|rollback|pending|recover-pending|undo|undo-peek|locks|export|import|logs'); break }
+
+      if (sub === 'status') {
+        const status = operationAudit.getStatus()
+        out(`操作来源审计状态:`)
+        out(`  总记录数: ${status.totalRecords}`)
+        out(`  未完成操作: ${status.pendingOperations}`)
+        out(`  活跃锁: ${status.activeLocks}`)
+        out(`  各状态统计:`)
+        Object.keys(status.byStatus).forEach(s => {
+          out(`    ${s}: ${status.byStatus[s]}`)
+        })
+        out(`  各操作统计:`)
+        Object.keys(status.byAction).forEach(a => {
+          out(`    ${a}: ${status.byAction[a]}`)
+        })
+        out(`  有可撤销操作: ${status.hasUndo ? '是' : '否'}`)
+      } else if (sub === 'records') {
+        const opts = {}
+        const actionIdx = args.indexOf('--action')
+        const entryIdx = args.indexOf('--entry')
+        const userIdx = args.indexOf('--user')
+        const statusIdx = args.indexOf('--status')
+        const targetIdx = args.indexOf('--target')
+        if (actionIdx >= 0 && args[actionIdx + 1]) opts.action = args[actionIdx + 1]
+        if (entryIdx >= 0 && args[entryIdx + 1]) opts.entry = args[entryIdx + 1]
+        if (userIdx >= 0 && args[userIdx + 1]) opts.userId = args[userIdx + 1]
+        if (statusIdx >= 0 && args[statusIdx + 1]) opts.status = args[statusIdx + 1]
+        if (targetIdx >= 0 && args[targetIdx + 1]) opts.targetKey = args[targetIdx + 1]
+        const list = operationAudit.listRecords(opts)
+        if (list.length === 0) {
+          yellow('暂无审计记录')
+        } else {
+          out(`共有 ${list.length} 条审计记录:`)
+          list.forEach((r, i) => {
+            out(`  ${i + 1}. [${r.status}] ${r.action} - ${r.targetKey}`)
+            out(`     ID: ${r.id}`)
+            out(`     入口: ${r.entry} | 用户: ${r.userName} (${r.userId})`)
+            if (r.sessionId) out(`     会话: ${r.sessionId}`)
+            if (r.requestId) out(`     请求: ${r.requestId}`)
+            out(`     触发: ${r.triggeredAt}`)
+            if (r.completedAt) out(`     完成: ${r.completedAt}`)
+            if (r.error) out(`     错误: ${r.error}`)
+          })
+        }
+      } else if (sub === 'show') {
+        const recordId = args[2]
+        if (!recordId) { err('用法: audit show <recordId>'); break }
+        const record = operationAudit.getRecord(recordId)
+        if (!record) { err(`审计记录不存在: ${recordId}`); break }
+        out(`审计记录详情:`)
+        out(`  ID: ${record.id}`)
+        out(`  操作: ${record.action}`)
+        out(`  目标: ${record.targetKey}`)
+        out(`  状态: ${record.status}`)
+        out(`  入口: ${record.entry}`)
+        out(`  用户: ${record.userName} (${record.userId})`)
+        if (record.sessionId) out(`  会话: ${record.sessionId}`)
+        if (record.requestId) out(`  请求: ${record.requestId}`)
+        out(`  触发时间: ${record.triggeredAt}`)
+        if (record.completedAt) out(`  完成时间: ${record.completedAt}`)
+        if (record.error) out(`  错误: ${record.error}`)
+        if (record.beforeSnapshot) out(`  前版本快照: 已记录 (commits: ${record.beforeSnapshot.commits ? record.beforeSnapshot.commits.length : 'N/A'}, drafts: ${record.beforeSnapshot.drafts ? record.beforeSnapshot.drafts.length : 'N/A'})`)
+        if (record.afterSnapshot) out(`  后版本快照: 已记录 (commits: ${record.afterSnapshot.commits ? record.afterSnapshot.commits.length : 'N/A'}, drafts: ${record.afterSnapshot.drafts ? record.afterSnapshot.drafts.length : 'N/A'})`)
+      } else if (sub === 'rollback') {
+        const recordId = args[2]
+        if (!recordId) { err('用法: audit rollback <recordId> [--user <name>]'); break }
+        const userIdx = args.indexOf('--user')
+        const context = { entry: operationAudit.ENTRY_CLI }
+        if (userIdx >= 0 && args[userIdx + 1]) {
+          context.userId = args[userIdx + 1]
+          context.userName = args[userIdx + 1]
+        }
+        const result = operationAudit.rollbackOperation(recordId, context)
+        if (result.success) {
+          ok(`已回滚审计记录: ${recordId}`)
+          out(`  可使用 "rn audit undo" 撤销本次回滚`)
+        } else {
+          err(`回滚失败: ${result.errors ? result.errors.join('; ') : '未知'}`)
+        }
+      } else if (sub === 'pending') {
+        const list = operationAudit.getPendingOperations()
+        if (list.length === 0) {
+          ok('没有未完成的操作')
+        } else {
+          yellow(`发现 ${list.length} 个未完成操作:`)
+          list.forEach((p, i) => {
+            out(`  ${i + 1}. [${p.status}] ${p.action} - ${p.targetKey}`)
+            out(`     记录ID: ${p.recordId}`)
+            out(`     入口: ${p.entry} | 用户: ${p.userId}`)
+            out(`     创建时间: ${p.createdAt}`)
+          })
+        }
+      } else if (sub === 'recover-pending') {
+        const result = operationAudit.recoverPendingOperations()
+        if (result.recovered > 0) {
+          ok(`已恢复 ${result.recovered}/${result.total} 条未完成操作`)
+          result.results.forEach((r, i) => {
+            if (r.success) {
+              out(`  ${i + 1}. ✓ ${r.recordId}`)
+            } else {
+              err(`  ${i + 1}. ✗ ${r.recordId}: ${r.reason || '未知'}`)
+            }
+          })
+        } else if (result.total === 0) {
+          ok('没有需要恢复的未完成操作')
+        } else {
+          yellow(`恢复完成: 0/${result.total} 条操作成功恢复`)
+        }
+      } else if (sub === 'undo') {
+        const result = operationAudit.undoLastRecoveryOrRollback()
+        if (result.success) {
+          ok(`已撤销${result.action === 'recover' ? '恢复' : (result.action === 'rollback' ? '回滚' : '自动恢复')}操作`)
+        } else {
+          err(`撤销失败: ${result.reason}`)
+        }
+      } else if (sub === 'undo-peek') {
+        const peek = operationAudit.peekUndo()
+        if (!peek) {
+          yellow('没有可撤销的恢复或回滚操作')
+        } else {
+          out(`可撤销: ${peek.action}操作`)
+          out(`  记录ID: ${peek.recordId || '(无)'}`)
+          out(`  时间: ${peek.timestamp}`)
+        }
+      } else if (sub === 'locks') {
+        const locks = operationAudit.getLockTable()
+        const keys = Object.keys(locks)
+        if (keys.length === 0) {
+          ok('没有活跃的锁')
+        } else {
+          yellow(`发现 ${keys.length} 个活跃锁:`)
+          keys.forEach((k, i) => {
+            const lock = locks[k]
+            out(`  ${i + 1}. ${k}`)
+            out(`     持有者: ${lock.operatorName} (${lock.operator})`)
+            out(`     入口: ${lock.entry}`)
+            if (lock.sessionId) out(`     会话: ${lock.sessionId}`)
+            out(`     获取时间: ${lock.acquiredAt}`)
+          })
+        }
+      } else if (sub === 'export') {
+        const outputPath = args[2]
+        try {
+          if (outputPath) {
+            const result = operationAudit.exportAuditToFile(outputPath)
+            if (result.success) {
+              ok(`审计数据已导出: ${result.path}`)
+            } else {
+              err(`导出失败: ${result.errors.join('; ')}`)
+            }
+          } else {
+            const data = operationAudit.exportAuditToJson()
+            out(JSON.stringify(data, null, 2))
+          }
+        } catch (e) {
+          err(`导出失败: ${e.message}`)
+        }
+      } else if (sub === 'import') {
+        const target = args[2]
+        if (!target) { err('用法: audit import <file> [--force]'); break }
+        const force = args.indexOf('--force') >= 0
+        const opts = { force }
+        try {
+          const result = operationAudit.importAuditFromFile(target, opts)
+          if (result.success) {
+            ok(`已导入: ${result.importedCount} 条记录`)
+            if (result.skipped > 0) yellow(`  跳过: ${result.skipped} 条 (冲突: ${result.conflictCount})`)
+          } else {
+            err(`导入失败: ${result.errors.join('; ')}`)
+          }
+        } catch (e) {
+          err(`导入失败: ${e.message}`)
+        }
+      } else if (sub === 'logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 20
+        try {
+          const logs = operationAudit.listLogs(isNaN(n) ? 20 : n)
+          if (logs.length === 0) {
+            yellow('暂无审计操作日志')
+          } else {
+            out(`最近 ${logs.length} 条审计操作日志:`)
+            logs.forEach((l, i) => {
+              out(`  ${i + 1}. [${l.action}] ${l.timestamp}`)
+              if (l.recordId) out(`     记录: ${l.recordId}`)
+              if (l.operationAction) out(`     操作: ${l.operationAction}`)
+              if (l.targetKey) out(`     目标: ${l.targetKey}`)
+              if (l.entry) out(`     入口: ${l.entry}`)
+              if (l.userId) out(`     用户: ${l.userId}`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
+        }
+      } else {
+        err('未知 audit 子命令。使用: status|records|show|rollback|pending|recover-pending|undo|undo-peek|locks|export|import|logs')
       }
       break
     }

@@ -16,6 +16,7 @@ const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
 const versionRegistry = require('../src/versionRegistry')
 const draftVault = require('../src/draftVault')
+const operationAudit = require('../src/operationAudit')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -26,6 +27,11 @@ function sendJson(res, data, status) {
 
 function sendError(res, message, status) {
   sendJson(res, { error: message }, status || 400)
+}
+
+function _headerVal(raw) {
+  if (!raw) return null
+  try { return decodeURIComponent(raw) } catch { return raw }
 }
 
 function parseBody(req) {
@@ -599,10 +605,21 @@ async function handleApi(req, res, pathname) {
 
   if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/apply') && method === 'POST') {
     const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/apply'.length)
+    const body = await parseBody(req)
     try {
-      const result = draft.applyDraft(id)
+      const auditContext = {
+        entry: operationAudit.ENTRY_WEB,
+        userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
+        userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
+        sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
+        requestId: body.requestId || null
+      }
+      if (!auditContext.userId) {
+        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+      }
+      const result = draft.applyDraft(id, { _auditContext: auditContext })
       if (!result.success && result.errors && result.errors.length > 0) {
-        return sendError(res, result.errors.join('; '), 400)
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
       }
       return sendJson(res, result)
     } catch (e) {
@@ -612,8 +629,22 @@ async function handleApi(req, res, pathname) {
 
   if (url.pathname.startsWith('/api/drafts/') && url.pathname.endsWith('/archive') && method === 'POST') {
     const id = url.pathname.substring('/api/drafts/'.length, url.pathname.length - '/archive'.length)
+    const body = await parseBody(req)
     try {
-      const result = draft.archiveDraft(id)
+      const auditContext = {
+        entry: operationAudit.ENTRY_WEB,
+        userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
+        userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
+        sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
+        requestId: body.requestId || null
+      }
+      if (!auditContext.userId) {
+        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+      }
+      const opts = { _auditContext: auditContext, _vaultSource: 'web' }
+      if (body.userId) opts.userId = body.userId
+      if (body.userName) opts.userName = body.userName
+      const result = draft.archiveDraft(id, opts)
       if (!result.success && result.errors && result.errors.length > 0) {
         return sendError(res, result.errors.join('; '), 400)
       }
@@ -661,9 +692,21 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/drafts/import' && method === 'POST') {
     const body = await parseBody(req)
     try {
+      const auditContext = {
+        entry: operationAudit.ENTRY_WEB,
+        userId: body.userId || _headerVal(req.headers['x-user-id']) || null,
+        userName: body.userName || _headerVal(req.headers['x-user-name']) || null,
+        sessionId: body.sessionId || _headerVal(req.headers['x-session-id']) || null,
+        requestId: body.requestId || null
+      }
+      if (!auditContext.userId) {
+        return sendError(res, '审计拦截: 必须提供 userId (通过 body.userId 或 X-User-Id 头)', 403)
+      }
       let result
-      const opts = { force: body.force, _vaultSource: 'web' }
+      const opts = { force: body.force, _vaultSource: 'web', _auditContext: auditContext }
       if (body.asName) opts.asName = body.asName
+      if (body.userId) opts.userId = body.userId
+      if (body.userName) opts.userName = body.userName
       if (body.path) {
         result = draft.importDraftFromFile(body.path, opts)
       } else if (body.draftData) {
@@ -1151,6 +1194,157 @@ async function handleApi(req, res, pathname) {
     }
   }
 
+  if (url.pathname === '/api/audit/status' && method === 'GET') {
+    try {
+      return sendJson(res, operationAudit.getStatus())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/records' && method === 'GET') {
+    try {
+      const options = {}
+      const action = url.searchParams.get('action')
+      const entry = url.searchParams.get('entry')
+      const userId = url.searchParams.get('userId')
+      const status = url.searchParams.get('status')
+      const targetKey = url.searchParams.get('targetKey')
+      if (action) options.action = action
+      if (entry) options.entry = entry
+      if (userId) options.userId = userId
+      if (status) options.status = status
+      if (targetKey) options.targetKey = targetKey
+      return sendJson(res, { records: operationAudit.listRecords(options) })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/audit/records/') && method === 'GET') {
+    const recordId = url.pathname.substring('/api/audit/records/'.length)
+    try {
+      const record = operationAudit.getRecord(recordId)
+      if (!record) return sendError(res, `审计记录不存在: ${recordId}`, 404)
+      return sendJson(res, { record })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/audit/records/') && url.pathname.endsWith('/rollback') && method === 'POST') {
+    const recordId = url.pathname.substring('/api/audit/records/'.length, url.pathname.length - '/rollback'.length)
+    const body = await parseBody(req)
+    try {
+      const context = body ? {
+        entry: operationAudit.ENTRY_WEB,
+        userId: body.userId || null,
+        userName: body.userName || null
+      } : null
+      const result = operationAudit.rollbackOperation(recordId, context)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/pending' && method === 'GET') {
+    try {
+      return sendJson(res, { pending: operationAudit.getPendingOperations() })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/recover-pending' && method === 'POST') {
+    try {
+      const result = operationAudit.recoverPendingOperations()
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/undo' && method === 'POST') {
+    try {
+      const result = operationAudit.undoLastRecoveryOrRollback()
+      if (!result.success && result.reason) {
+        return sendError(res, result.reason, 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/undo/peek' && method === 'GET') {
+    try {
+      return sendJson(res, operationAudit.peekUndo())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/locks' && method === 'GET') {
+    try {
+      return sendJson(res, { locks: operationAudit.getLockTable() })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/export' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      if (body && body.outputPath) {
+        result = operationAudit.exportAuditToFile(body.outputPath, body)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+      } else {
+        result = operationAudit.exportAuditToJson(body)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/import' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      const opts = { force: body && body.force }
+      if (body && body.path) {
+        result = operationAudit.importAuditFromFile(body.path, opts)
+      } else if (body && body.auditData) {
+        result = operationAudit.importAuditFromJson(body.auditData, opts)
+      } else {
+        return sendError(res, '缺少 path 或 auditData 参数')
+      }
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/audit/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '50', 10)
+    try {
+      const logs = operationAudit.listLogs(isNaN(n) ? 50 : n)
+      return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
   sendError(res, `未找到接口: ${method} ${url.pathname}`, 404)
 }
 
@@ -1208,12 +1402,23 @@ function startServer(port) {
     }
   }
 
+  const auditPending = operationAudit.getPendingOperations()
+  if (auditPending.length > 0) {
+    console.log('\x1b[33m操作来源审计发现未完成操作，正在自动恢复...\x1b[0m')
+    const auditResult = operationAudit.recoverPendingOperations()
+    if (auditResult.recovered > 0) {
+      console.log(`\x1b[32m操作来源审计自动恢复完成: ${auditResult.recovered}/${auditResult.total} 条操作已恢复\x1b[0m`)
+    }
+  }
+
   server.listen(port, () => {
     console.log(`\x1b[32m发布说明工具 Web 界面已启动: http://localhost:${port}\x1b[0m`)
   })
 }
 
 module.exports = startServer
+module.exports.startServer = startServer
+module.exports.handleApi = handleApi
 
 if (require.main === module) {
   const port = parseInt(process.argv[2], 10) || 3000

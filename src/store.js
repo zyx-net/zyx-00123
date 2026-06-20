@@ -365,6 +365,47 @@ function clearDraftVaultRecoveryUndo() {
   }
 }
 
+function loadOperationAudit() {
+  return load('operation_audit') || { records: [], pendingOps: [], lockTable: {} }
+}
+
+function saveOperationAudit(data) {
+  save('operation_audit', data)
+}
+
+function loadOperationAuditLogs() {
+  return load('operation_audit_logs') || []
+}
+
+function saveOperationAuditLogs(logs) {
+  save('operation_audit_logs', logs)
+}
+
+function appendOperationAuditLog(entry) {
+  const logs = loadOperationAuditLogs()
+  logs.push(entry)
+  if (logs.length > 300) {
+    logs.splice(0, logs.length - 300)
+  }
+  saveOperationAuditLogs(logs)
+  return logs
+}
+
+function loadOperationAuditUndo() {
+  return load('operation_audit_undo') || null
+}
+
+function saveOperationAuditUndo(snapshot) {
+  save('operation_audit_undo', snapshot)
+}
+
+function clearOperationAuditUndo() {
+  const fp = filePath('operation_audit_undo')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -421,6 +462,14 @@ module.exports = {
   loadDraftVaultRecoveryUndo,
   saveDraftVaultRecoveryUndo,
   clearDraftVaultRecoveryUndo,
+  loadOperationAudit,
+  saveOperationAudit,
+  loadOperationAuditLogs,
+  saveOperationAuditLogs,
+  appendOperationAuditLog,
+  loadOperationAuditUndo,
+  saveOperationAuditUndo,
+  clearOperationAuditUndo,
   DATA_DIR,
   BACKUPS_DIR
 }

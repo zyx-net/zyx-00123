@@ -4,6 +4,7 @@ const validator = require('./validator')
 const archiver = require('./archiver')
 const versionRegistry = require('./versionRegistry')
 const draftVault = require('./draftVault')
+const operationAudit = require('./operationAudit')
 const crypto = require('crypto')
 
 function genId() {
@@ -231,8 +232,8 @@ function updateDraft(id, updates, options) {
   }
 
   const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_UPDATE, options._vaultSource || draftVault.SOURCE_CLI, {
-    operator: userId || 'anonymous',
-    operatorName: userName || '匿名用户',
+    operator: userId || 'system',
+    operatorName: userName || '系统编排',
     draftName: oldDraft.name,
     version: newVersion
   })
@@ -348,8 +349,8 @@ function duplicateDraft(id, newName, options) {
   }
 
   const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_DUPLICATE, options._vaultSource || draftVault.SOURCE_CLI, {
-    operator: userId || 'anonymous',
-    operatorName: userName || '匿名用户',
+    operator: userId || 'system',
+    operatorName: userName || '系统编排',
     draftName: draftObj.name,
     version: draftObj.version
   })
@@ -697,20 +698,31 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
   return { success: true, draft: overwrittenDraft, overwritten: true, versionRegistryEntry: occupyResult ? occupyResult.entry : null }
 }
 
-function applyDraft(id) {
+function applyDraft(id, options) {
+  options = options || {}
+  const auditContext = options._auditContext || null
+
+  if (auditContext) {
+    return operationAudit.orchestrateApply(id, auditContext, () => _applyDraftInner(id))
+  }
+
+  return _applyDraftInner(id)
+}
+
+function _applyDraftInner(id) {
   const draft = getDraft(id)
   if (!draft) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
   }
 
+  const currentCommits = store.loadCommits()
+
   const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_APPLY, draftVault.SOURCE_CLI, {
-    operator: 'anonymous',
-    operatorName: '匿名用户',
+    operator: 'system',
+    operatorName: '系统编排',
     draftName: draft.name,
     version: draft.version
   })
-
-  const currentCommits = store.loadCommits()
 
   try {
     store.saveCommits(JSON.parse(JSON.stringify(draft.commits)))
@@ -740,6 +752,17 @@ function applyDraft(id) {
 
 function archiveDraft(id, options) {
   options = options || {}
+  const auditContext = options._auditContext || null
+
+  if (auditContext) {
+    return operationAudit.orchestrateArchive(id, auditContext, () => _archiveDraftInner(id, options))
+  }
+
+  return _archiveDraftInner(id, options)
+}
+
+function _archiveDraftInner(id, options) {
+  options = options || {}
   const draft = getDraft(id)
   if (!draft) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
@@ -750,8 +773,8 @@ function archiveDraft(id, options) {
   }
 
   const vaultSnap = draftVault.createSnapshot(id, draftVault.ACTION_ARCHIVE, (options._vaultSource || draftVault.SOURCE_CLI), {
-    operator: options.userId || 'anonymous',
-    operatorName: options.userName || '匿名用户',
+    operator: options.userId || 'system',
+    operatorName: options.userName || '系统编排',
     draftName: draft.name,
     version: draft.version
   })
@@ -949,6 +972,17 @@ function exportDraftToFile(id, outputPath) {
 
 function importDraftFromJson(data, options) {
   options = options || {}
+  const auditContext = options._auditContext || null
+
+  if (auditContext) {
+    return operationAudit.orchestrateImport(auditContext, () => _importDraftFromJsonInner(data, options))
+  }
+
+  return _importDraftFromJsonInner(data, options)
+}
+
+function _importDraftFromJsonInner(data, options) {
+  options = options || {}
   const asName = options.asName || null
   const force = options.force || false
   const isAdmin = options.isAdmin || false
@@ -988,8 +1022,8 @@ function importDraftFromJson(data, options) {
   }
 
   const vaultSnap = draftVault.createSnapshot(null, draftVault.ACTION_IMPORT, options._vaultSource || draftVault.SOURCE_CLI, {
-    operator: userId || 'anonymous',
-    operatorName: userName || '匿名用户',
+    operator: userId || 'system',
+    operatorName: userName || '系统编排',
     draftName: name,
     version: draftData.version || ''
   })
