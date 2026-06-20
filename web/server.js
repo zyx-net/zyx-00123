@@ -14,6 +14,7 @@ const exporter = require('../src/exporter')
 const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
+const versionRegistry = require('../src/versionRegistry')
 
 const WEB_DIR = path.join(__dirname)
 
@@ -719,6 +720,232 @@ async function handleApi(req, res, pathname) {
   if (url.pathname === '/api/drafts/undo/stack' && method === 'GET') {
     try {
       return sendJson(res, { stack: draft.peekUndoStack() })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/drafts/reconcile' && method === 'POST') {
+    try {
+      draft.reconcileRegistry()
+      return sendJson(res, { success: true })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry' && method === 'GET') {
+    try {
+      const opts = {}
+      const version = url.searchParams.get('version')
+      const status = url.searchParams.get('status')
+      const userId = url.searchParams.get('userId')
+      const draftId = url.searchParams.get('draftId')
+      if (version) opts.version = version
+      if (status) opts.status = status
+      if (userId) opts.userId = userId
+      if (draftId) opts.draftId = draftId
+      const entries = versionRegistry.listEntries(opts)
+      return sendJson(res, { entries })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname.startsWith('/api/version-registry/') && method === 'GET') {
+    const version = decodeURIComponent(url.pathname.substring('/api/version-registry/'.length))
+    if (version === 'logs') {
+    } else if (version === 'undo') {
+    } else if (version === 'export') {
+    } else if (version === 'reconcile') {
+    } else {
+      try {
+        const entry = versionRegistry.getEntry(version)
+        return sendJson(res, { entry })
+      } catch (e) {
+        return sendError(res, e.message)
+      }
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/check' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.version) return sendError(res, '缺少 version 参数')
+    try {
+      const result = versionRegistry.checkAvailability(body.version, {
+        userId: body.userId,
+        userName: body.userName
+      })
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/occupy' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.version) return sendError(res, '缺少 version 参数')
+    try {
+      const opts = {
+        isAdmin: !!body.isAdmin,
+        userId: body.userId,
+        userName: body.userName,
+        sourceAction: body.sourceAction,
+        draftId: body.draftId,
+        draftName: body.draftName,
+        takeoverReason: body.takeoverReason
+      }
+      const result = versionRegistry.occupyVersion(body.version, opts)
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/preoccupy' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.version) return sendError(res, '缺少 version 参数')
+    try {
+      const result = versionRegistry.preoccupyVersion(body.version, {
+        userId: body.userId,
+        userName: body.userName,
+        draftName: body.draftName
+      })
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/release' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.version) return sendError(res, '缺少 version 参数')
+    try {
+      const result = versionRegistry.releaseVersion(body.version, {
+        isAdmin: !!body.isAdmin,
+        userId: body.userId,
+        userName: body.userName,
+        reason: body.reason
+      })
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/takeover' && method === 'POST') {
+    const body = await parseBody(req)
+    if (!body.version) return sendError(res, '缺少 version 参数')
+    if (!body.reason) return sendError(res, '必须指定接管理由 reason')
+    try {
+      const result = versionRegistry.takeoverVersion(body.version, {
+        isAdmin: true,
+        userId: body.userId,
+        userName: body.userName,
+        draftId: body.draftId,
+        draftName: body.draftName,
+        reason: body.reason
+      })
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), result.blocked ? 409 : 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/logs' && method === 'GET') {
+    const n = parseInt(url.searchParams.get('limit') || '50', 10)
+    try {
+      const logs = versionRegistry.listLogs(isNaN(n) ? 50 : n)
+      return sendJson(res, { logs })
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/undo' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      const result = versionRegistry.undoLastChange({
+        userId: body && body.userId,
+        userName: body && body.userName
+      })
+      if (!result.success && result.reason) {
+        return sendError(res, result.reason, 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/undo/peek' && method === 'GET') {
+    try {
+      return sendJson(res, versionRegistry.peekUndo())
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/export' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      if (body.outputPath) {
+        const result = versionRegistry.exportRegistryToFile(body.outputPath)
+        if (!result.success && result.errors) {
+          return sendError(res, result.errors.join('; '), 400)
+        }
+        return sendJson(res, result)
+      } else {
+        const result = versionRegistry.exportRegistryToJson()
+        return sendJson(res, result)
+      }
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/import' && method === 'POST') {
+    const body = await parseBody(req)
+    try {
+      let result
+      const opts = {
+        force: !!body.force,
+        userId: body.userId,
+        userName: body.userName
+      }
+      if (body.path) {
+        result = versionRegistry.importRegistryFromFile(body.path, opts)
+      } else if (body.registryData) {
+        result = versionRegistry.importRegistryFromJson(body.registryData, opts)
+      } else {
+        return sendError(res, '缺少 path 或 registryData 参数')
+      }
+      if (!result.success && result.errors && result.errors.length > 0) {
+        return sendError(res, result.errors.join('; '), 400)
+      }
+      return sendJson(res, result)
+    } catch (e) {
+      return sendError(res, e.message)
+    }
+  }
+
+  if (url.pathname === '/api/version-registry/reconcile' && method === 'POST') {
+    try {
+      const drafts = draft.listDrafts()
+      const result = versionRegistry.reconcileWithDrafts(drafts)
+      return sendJson(res, { success: true, ...result })
     } catch (e) {
       return sendError(res, e.message)
     }

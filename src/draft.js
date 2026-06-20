@@ -2,6 +2,7 @@ const store = require('./store')
 const config = require('./config')
 const validator = require('./validator')
 const archiver = require('./archiver')
+const versionRegistry = require('./versionRegistry')
 const crypto = require('crypto')
 
 function genId() {
@@ -48,6 +49,10 @@ function createDraft(options) {
   const version = options.version || ''
   const description = options.description || ''
   const force = options.force || false
+  const isAdmin = options.isAdmin || false
+  const userId = options.userId
+  const userName = options.userName
+  const takeoverReason = options.takeoverReason || ''
 
   if (!name) {
     return { success: false, errors: ['草稿名称不能为空'], blocked: false }
@@ -65,14 +70,17 @@ function createDraft(options) {
   }
 
   if (version) {
-    const byVersion = findDuplicateVersion(version)
-    if (byVersion && !force) {
-      return {
-        success: false,
-        errors: [`同版本号草稿已存在: ${version} (${byVersion.name})`],
-        blocked: true,
-        reason: 'duplicate_version',
-        existingId: byVersion.id
+    const vr = versionRegistry.checkAvailability(version, { userId })
+    if (!vr.available && !vr.selfOccupied) {
+      if (force && isAdmin) {
+      } else {
+        return {
+          success: false,
+          errors: [`版本号 ${version} 已被占用: ${vr.occupier}（来源: ${vr.sourceAction || '未知'}，草稿: ${vr.draftName || '(未知)'}）`],
+          blocked: true,
+          reason: 'version_occupied',
+          versionConflict: vr
+        }
       }
     }
   }
@@ -119,12 +127,26 @@ function createDraft(options) {
 
   store.saveDrafts(drafts)
 
+  if (version) {
+    versionRegistry.occupyVersion(version, {
+      userId,
+      userName,
+      draftId: draft.id,
+      draftName: name,
+      sourceAction: versionRegistry.SOURCE_CREATE,
+      force,
+      isAdmin,
+      reason: takeoverReason
+    })
+  }
+
   store.appendDraftLog({
     action: 'create',
     draftId: draft.id,
     draftName: name,
+    version,
     timestamp: now,
-    description: `创建草稿: ${name}`
+    description: `创建草稿: ${name}${version ? ' (版本: ' + version + ')' : ''}`
   })
 
   _saveUndoSnapshot('create', draft.id, `创建草稿: ${name}`, null, draftsBefore)
@@ -139,6 +161,10 @@ function createDraft(options) {
 function updateDraft(id, updates, options) {
   options = options || {}
   const force = options.force || false
+  const isAdmin = options.isAdmin || false
+  const userId = options.userId
+  const userName = options.userName
+  const takeoverReason = options.takeoverReason || ''
 
   const drafts = store.loadDrafts()
   const idx = drafts.findIndex(d => d.id === id)
@@ -163,17 +189,28 @@ function updateDraft(id, updates, options) {
     }
   }
 
-  if (newVersion && newVersion !== oldDraft.version) {
-    const byVersion = findDuplicateVersion(newVersion, id)
-    if (byVersion && !force) {
+  if (newVersion !== oldDraft.version) {
+    const vr = versionRegistry.updateEntryForDraft(id, newName, newVersion, {
+      userId,
+      userName,
+      force,
+      isAdmin,
+      reason: takeoverReason
+    })
+    if (!vr.success) {
       return {
         success: false,
-        errors: [`同版本号草稿已存在: ${newVersion} (${byVersion.name})`],
-        blocked: true,
-        reason: 'duplicate_version',
-        existingId: byVersion.id
+        errors: vr.errors,
+        blocked: vr.blocked,
+        reason: vr.reason,
+        versionConflict: vr.conflict
       }
     }
+  } else if (newName !== oldDraft.name && newVersion) {
+    versionRegistry.updateEntryForDraft(id, newName, newVersion, {
+      userId,
+      userName
+    })
   }
 
   const updated = { ...oldDraft }
@@ -196,8 +233,9 @@ function updateDraft(id, updates, options) {
     action: 'update',
     draftId: id,
     draftName: updated.name,
+    version: newVersion,
     timestamp: updated.updatedAt,
-    description: `更新草稿: ${updated.name}`
+    description: `更新草稿: ${updated.name}${newVersion ? ' (版本: ' + newVersion + ')' : ''}`
   })
 
   _saveUndoSnapshot('update', id, `更新草稿: ${updated.name}`, oldDraft, draftsBefore)
@@ -205,7 +243,8 @@ function updateDraft(id, updates, options) {
   return { success: true, draft: updated }
 }
 
-function deleteDraft(id) {
+function deleteDraft(id, options) {
+  options = options || {}
   const drafts = store.loadDrafts()
   const idx = drafts.findIndex(d => d.id === id)
   if (idx < 0) {
@@ -217,13 +256,20 @@ function deleteDraft(id) {
   drafts.splice(idx, 1)
   store.saveDrafts(drafts)
 
+  versionRegistry.releaseByDraftId(id, {
+    userId: options.userId,
+    userName: options.userName,
+    reason: '删除草稿'
+  })
+
   const now = new Date().toISOString()
   store.appendDraftLog({
     action: 'delete',
     draftId: id,
     draftName: deleted.name,
+    version: deleted.version,
     timestamp: now,
-    description: `删除草稿: ${deleted.name}`
+    description: `删除草稿: ${deleted.name}${deleted.version ? ' (版本: ' + deleted.version + ')' : ''}`
   })
 
   _saveUndoSnapshot('delete', id, `删除草稿: ${deleted.name}`, deleted, draftsBefore)
@@ -234,6 +280,10 @@ function deleteDraft(id) {
 function duplicateDraft(id, newName, options) {
   options = options || {}
   const resolve = options.resolve || 'cancel'
+  const isAdmin = options.isAdmin || false
+  const userId = options.userId
+  const userName = options.userName
+  const takeoverReason = options.takeoverReason || ''
 
   const draftObj = getDraft(id)
   if (!draftObj) {
@@ -243,9 +293,16 @@ function duplicateDraft(id, newName, options) {
   const name = newName || `${draftObj.name} (副本)`
 
   const byName = findDuplicateName(name)
-  const byVersion = draftObj.version ? findDuplicateVersion(draftObj.version, draftObj.id) : null
 
-  if (byName || byVersion) {
+  let versionConflict = null
+  if (draftObj.version) {
+    const vr = versionRegistry.checkAvailability(draftObj.version, { userId })
+    if (!vr.available && !vr.selfOccupied) {
+      versionConflict = vr
+    }
+  }
+
+  if (byName || versionConflict) {
     if (resolve === 'cancel') {
       const errors = []
       let reason = ''
@@ -255,14 +312,14 @@ function duplicateDraft(id, newName, options) {
         reason = 'duplicate_name'
         existingId = byName.id
       }
-      if (byVersion && byVersion.id !== (byName ? byName.id : null)) {
-        errors.push(`同版本号草稿已存在: ${draftObj.version} (${byVersion.name})`)
-        reason = 'duplicate_version'
-        existingId = byVersion.id
-      } else if (byVersion && !byName) {
-        errors.push(`同版本号草稿已存在: ${draftObj.version} (${byVersion.name})`)
-        reason = 'duplicate_version'
-        existingId = byVersion.id
+      if (versionConflict) {
+        errors.push(`版本号 ${draftObj.version} 已被占用: ${versionConflict.occupier}（来源: ${versionConflict.sourceAction || '未知'}，草稿: ${versionConflict.draftName || '(未知)'}）`)
+        if (!reason) {
+          reason = 'version_occupied'
+        }
+        if (!existingId && versionConflict.existing) {
+          existingId = versionConflict.existing.draftId
+        }
       }
       return {
         success: false,
@@ -272,7 +329,13 @@ function duplicateDraft(id, newName, options) {
         existingId,
         conflictDetails: {
           nameConflict: byName ? { existingId: byName.id, existingName: byName.name } : null,
-          versionConflict: byVersion ? { existingId: byVersion.id, existingVersion: draftObj.version, existingName: byVersion.name } : null
+          versionConflict: versionConflict ? {
+            existingId: versionConflict.existing ? versionConflict.existing.draftId : null,
+            existingVersion: draftObj.version,
+            existingName: versionConflict.draftName,
+            occupier: versionConflict.occupier,
+            sourceAction: versionConflict.sourceAction
+          } : null
         }
       }
     }
@@ -284,7 +347,18 @@ function duplicateDraft(id, newName, options) {
         suffix++
         finalName = `${name} (${suffix})`
       }
-      return _doDuplicateDraft(draftObj, finalName)
+      let finalVersion = draftObj.version
+      let versionSuffix = 1
+      if (finalVersion) {
+        let vrAvail = versionRegistry.checkAvailability(finalVersion, { userId })
+        while (!vrAvail.available && !vrAvail.selfOccupied) {
+          versionSuffix++
+          finalVersion = `${draftObj.version}-副本${versionSuffix}`
+          vrAvail = versionRegistry.checkAvailability(finalVersion, { userId })
+        }
+      }
+      const sourceWithNewVersion = { ...draftObj, version: finalVersion }
+      return _doDuplicateDraft(sourceWithNewVersion, finalName, { userId, userName })
     }
 
     if (resolve === 'overwrite') {
@@ -296,14 +370,19 @@ function duplicateDraft(id, newName, options) {
           reason: 'no_name_match'
         }
       }
-      return _doOverwriteDraft(draftObj, name, byName)
+      return _doOverwriteDraft(draftObj, name, byName, { userId, userName, isAdmin, takeoverReason })
+    }
+
+    if (resolve === 'force' && isAdmin && versionConflict) {
+      return _doDuplicateDraft(draftObj, name, { userId, userName, isAdmin, force: true, takeoverReason })
     }
   }
 
-  return _doDuplicateDraft(draftObj, name)
+  return _doDuplicateDraft(draftObj, name, { userId, userName })
 }
 
-function _doDuplicateDraft(sourceDraft, newName) {
+function _doDuplicateDraft(sourceDraft, newName, options) {
+  options = options || {}
   const draftsBefore = store.loadDrafts()
   const now = new Date().toISOString()
   const newDraft = {
@@ -314,6 +393,28 @@ function _doDuplicateDraft(sourceDraft, newName) {
     updatedAt: now
   }
 
+  if (newDraft.version) {
+    const vr = versionRegistry.occupyVersion(newDraft.version, {
+      userId: options.userId,
+      userName: options.userName,
+      draftId: newDraft.id,
+      draftName: newName,
+      sourceAction: versionRegistry.SOURCE_DUPLICATE,
+      force: options.force || false,
+      isAdmin: options.isAdmin || false,
+      reason: options.takeoverReason || ''
+    })
+    if (!vr.success) {
+      return {
+        success: false,
+        errors: vr.errors,
+        blocked: vr.blocked,
+        reason: vr.reason,
+        versionConflict: vr.conflict
+      }
+    }
+  }
+
   const drafts = store.loadDrafts()
   drafts.push(newDraft)
   store.saveDrafts(drafts)
@@ -322,10 +423,11 @@ function _doDuplicateDraft(sourceDraft, newName) {
     action: 'duplicate',
     draftId: newDraft.id,
     draftName: newName,
+    version: newDraft.version,
     sourceDraftId: sourceDraft.id,
     sourceDraftName: sourceDraft.name,
     timestamp: now,
-    description: `复制草稿: ${sourceDraft.name} → ${newName}`
+    description: `复制草稿: ${sourceDraft.name} → ${newName}${newDraft.version ? ' (版本: ' + newDraft.version + ')' : ''}`
   })
 
   _pushUndoSnapshot('duplicate', newDraft.id, `复制草稿: ${sourceDraft.name} → ${newName}`, null, draftsBefore)
@@ -333,9 +435,30 @@ function _doDuplicateDraft(sourceDraft, newName) {
   return { success: true, draft: newDraft }
 }
 
-function _doOverwriteDraft(sourceDraft, targetName, existingDraft) {
+function _doOverwriteDraft(sourceDraft, targetName, existingDraft, options) {
+  options = options || {}
   const draftsBefore = JSON.parse(JSON.stringify(store.loadDrafts()))
   const now = new Date().toISOString()
+
+  if (sourceDraft.version && sourceDraft.version !== existingDraft.version) {
+    const vr = versionRegistry.updateEntryForDraft(existingDraft.id, targetName, sourceDraft.version, {
+      userId: options.userId,
+      userName: options.userName,
+      force: options.force || false,
+      isAdmin: options.isAdmin || false,
+      reason: options.takeoverReason || ''
+    })
+    if (!vr.success) {
+      return {
+        success: false,
+        errors: vr.errors,
+        blocked: vr.blocked,
+        reason: vr.reason,
+        versionConflict: vr.conflict
+      }
+    }
+  }
+
   const overwrittenDraft = {
     ...JSON.parse(JSON.stringify(sourceDraft)),
     id: existingDraft.id,
@@ -356,6 +479,7 @@ function _doOverwriteDraft(sourceDraft, targetName, existingDraft) {
     action: 'duplicate_overwrite',
     draftId: overwrittenDraft.id,
     draftName: targetName,
+    version: overwrittenDraft.version,
     sourceDraftId: sourceDraft.id,
     sourceDraftName: sourceDraft.name,
     overwrittenDraftId: existingDraft.id,
@@ -395,7 +519,8 @@ function applyDraft(id) {
   }
 }
 
-function archiveDraft(id) {
+function archiveDraft(id, options) {
+  options = options || {}
   const draft = getDraft(id)
   if (!draft) {
     return { success: false, errors: [`草稿不存在: ${id}`], blocked: false }
@@ -424,6 +549,12 @@ function archiveDraft(id) {
       drafts.splice(idx, 1)
       store.saveDrafts(drafts)
     }
+
+    versionRegistry.releaseByDraftId(id, {
+      userId: options.userId,
+      userName: options.userName,
+      reason: '草稿归档成功'
+    })
 
     store.saveCommits(currentCommits)
 
@@ -590,6 +721,10 @@ function importDraftFromJson(data, options) {
   options = options || {}
   const asName = options.asName || null
   const force = options.force || false
+  const isAdmin = options.isAdmin || false
+  const userId = options.userId
+  const userName = options.userName
+  const takeoverReason = options.takeoverReason || ''
 
   if (!data || !data.draft || data.type !== 'release-notes-draft') {
     return { success: false, errors: ['草稿文件格式不正确'], blocked: false }
@@ -614,14 +749,17 @@ function importDraftFromJson(data, options) {
   }
 
   if (draftData.version) {
-    const byVersion = findDuplicateVersion(draftData.version)
-    if (byVersion && !force) {
-      return {
-        success: false,
-        errors: [`同版本号草稿已存在: ${draftData.version} (${byVersion.name})`],
-        blocked: true,
-        reason: 'duplicate_version',
-        existingId: byVersion.id
+    const vr = versionRegistry.checkAvailability(draftData.version, { userId })
+    if (!vr.available && !vr.selfOccupied) {
+      if (force && isAdmin) {
+      } else {
+        return {
+          success: false,
+          errors: [`版本号 ${draftData.version} 已被占用: ${vr.occupier}（来源: ${vr.sourceAction || '未知'}，草稿: ${vr.draftName || '(未知)'}）`],
+          blocked: true,
+          reason: 'version_occupied',
+          versionConflict: vr
+        }
       }
     }
   }
@@ -657,12 +795,26 @@ function importDraftFromJson(data, options) {
 
   store.saveDrafts(drafts)
 
+  if (draftData.version) {
+    versionRegistry.occupyVersion(draftData.version, {
+      userId,
+      userName,
+      draftId: newDraft.id,
+      draftName: name,
+      sourceAction: versionRegistry.SOURCE_IMPORT,
+      force,
+      isAdmin,
+      reason: takeoverReason
+    })
+  }
+
   store.appendDraftLog({
     action: 'import',
     draftId: newDraft.id,
     draftName: name,
+    version: newDraft.version,
     timestamp: now,
-    description: `导入草稿: ${name}`
+    description: `导入草稿: ${name}${newDraft.version ? ' (版本: ' + newDraft.version + ')' : ''}`
   })
 
   _saveUndoSnapshot('import', newDraft.id, `导入草稿: ${name}`, null, draftsBefore)
@@ -766,6 +918,11 @@ function peekUndoStack() {
   return store.loadDraftUndoStack()
 }
 
+function reconcileRegistry() {
+  const drafts = store.loadDrafts()
+  return versionRegistry.reconcileWithDrafts(drafts)
+}
+
 module.exports = {
   listDrafts,
   getDraft,
@@ -785,5 +942,6 @@ module.exports = {
   peekUndo,
   undoLastChange,
   undoStackSize,
-  peekUndoStack
+  peekUndoStack,
+  reconcileRegistry
 }

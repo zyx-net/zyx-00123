@@ -10,7 +10,8 @@ const config = require('../src/config')
 const TEST_DATA_DIR = path.join(__dirname, '..', 'data')
 
 function cleanTestData() {
-  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'draft_undo_stack', 'undo', 'config']
+  const files = ['commits', 'archives', 'drafts', 'draft_logs', 'draft_undo', 'draft_undo_stack', 'undo', 'config',
+    'version_registry', 'version_registry_logs', 'version_registry_undo']
   files.forEach(f => {
     const fp = path.join(TEST_DATA_DIR, `${f}.json`)
     if (fs.existsSync(fp)) {
@@ -416,5 +417,522 @@ runTest('比对结果包含所有必要字段', () => {
 })
 
 console.log('\n=== 所有审校台回归测试通过! ===')
+
+const versionRegistry = require('../src/versionRegistry')
+
+console.log('\n=== 版本占用登记中心回归测试 ===\n')
+
+console.log('--- 基本占用/释放测试 ---')
+
+runTest('版本可用性检查 - 空版本', () => {
+  const r = versionRegistry.checkAvailability('')
+  assert(r.available, '空版本号应该标记为可用（no_version）')
+  assert(r.reason === 'no_version', '应该返回 no_version')
+})
+
+runTest('预占版本 - 基础功能', () => {
+  const r = versionRegistry.preoccupyVersion('v100.0.0', {
+    userId: 'user1', userName: '预占用户', draftName: '预占测试草稿'
+  })
+  assert(r.success, '预占应该成功')
+  assert(r.entry.status === versionRegistry.STATUS_PREOCCUPIED, '状态应该是预占')
+  assert(r.entry.sourceAction === versionRegistry.SOURCE_MANUAL, '来源应该是 manual')
+})
+
+runTest('版本可用性检查 - 已预占', () => {
+  const r = versionRegistry.checkAvailability('v100.0.0')
+  assert(!r.available, '已预占的版本应该不可用')
+  assert(r.occupier === '预占用户', '应该返回正确占用者')
+})
+
+runTest('普通用户占用已被他人占用的版本应失败', () => {
+  const r = versionRegistry.occupyVersion('v100.0.0', {
+    userId: 'user2', userName: '其他用户', isAdmin: false,
+    sourceAction: versionRegistry.SOURCE_CREATE, draftName: '尝试占用草稿'
+  })
+  assert(!r.success, '普通用户不应该能占用他人已占版本')
+  assert(r.blocked, '应该被阻塞')
+  assert(r.reason === 'version_occupied', '阻塞原因应该是 version_occupied')
+})
+
+runTest('管理员带理由接管已占用版本', () => {
+  const r = versionRegistry.takeoverVersion('v100.0.0', {
+    userId: 'admin', userName: '系统管理员', reason: '测试接管功能',
+    draftName: '管理员接管后的草稿', draftId: 'd_test_takeover'
+  })
+  assert(r.success, '管理员接管应该成功')
+  assert(r.tookOver, '应该标记为已接管')
+  assert(r.entry.userId === 'admin', '新占用者应该是管理员')
+  assert(r.entry.draftId === 'd_test_takeover', '草稿ID应该更新')
+  assert(r.entry.history && r.entry.history.length >= 1, '应该有历史记录')
+})
+
+runTest('释放版本占用', () => {
+  const before = versionRegistry.getEntry('v100.0.0')
+  assert(before, '释放前应该存在')
+  const r = versionRegistry.releaseVersion('v100.0.0', {
+    userId: 'admin', userName: '系统管理员', reason: '测试释放'
+  })
+  assert(r.success, '释放应该成功')
+  const after = versionRegistry.getEntry('v100.0.0')
+  assert(!after, '释放后应该不存在')
+})
+
+console.log('\n--- 草稿流程版本占用集成测试 ---')
+
+runTest('创建草稿自动占用版本', () => {
+  const r = draft.createDraft({
+    name: '版本占用测试草稿1', version: 'v101.0.0',
+    userId: 'userA', userName: '用户A'
+  })
+  assert(r.success, '创建草稿应该成功')
+  const entry = versionRegistry.getEntry('v101.0.0')
+  assert(entry, '版本应该被自动占用')
+  assert(entry.status === versionRegistry.STATUS_OCCUPIED, '状态应该是已占用')
+  assert(entry.sourceAction === versionRegistry.SOURCE_CREATE, '来源应该是 create')
+  assert(entry.draftId === r.draft.id, '草稿ID应该匹配')
+})
+
+runTest('创建同版本草稿冲突 - 普通用户', () => {
+  const r = draft.createDraft({
+    name: '冲突草稿', version: 'v101.0.0',
+    userId: 'userB', userName: '用户B'
+  })
+  assert(!r.success, '普通用户创建同版本草稿应该失败')
+  assert(r.blocked, '应该被阻塞')
+  assert(r.reason === 'version_occupied', '阻塞原因应该是 version_occupied')
+})
+
+runTest('创建同版本草稿冲突 - 管理员强制接管', () => {
+  const r = draft.createDraft({
+    name: '管理员接管草稿', version: 'v101.0.0',
+    isAdmin: true, force: true, takeoverReason: '测试草稿创建时接管',
+    userId: 'admin', userName: '管理员'
+  })
+  assert(r.success, '管理员强制接管应该成功')
+  const entry = versionRegistry.getEntry('v101.0.0')
+  assert(entry.userId === 'admin', '占用者应该更新为管理员')
+})
+
+runTest('删除草稿自动释放版本', () => {
+  const before = versionRegistry.getEntry('v101.0.0')
+  assert(before, '删除前版本应该被占用')
+  const d = draft.getDraftByName('管理员接管草稿')
+  assert(d, '应该找到草稿')
+  const r = draft.deleteDraft(d.id, { userId: 'admin', userName: '管理员' })
+  assert(r.success, '删除草稿应该成功')
+  const after = versionRegistry.getEntry('v101.0.0')
+  assert(!after, '删除草稿后版本应该自动释放')
+})
+
+runTest('归档草稿自动释放版本', () => {
+  store.saveCommits([
+    { id: 'vr_test_c1', message: 'feat: 归档测试', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const cr = draft.createDraft({
+    name: '归档释放测试', version: 'v102.0.0',
+    userId: 'user1', userName: '用户1'
+  })
+  assert(cr.success, '创建草稿应该成功')
+  const entryBefore = versionRegistry.getEntry('v102.0.0')
+  assert(entryBefore, '归档前版本应该被占用')
+
+  const ar = draft.archiveDraft(cr.draft.id)
+  assert(ar.success, '归档应该成功')
+  const entryAfter = versionRegistry.getEntry('v102.0.0')
+  assert(!entryAfter, '归档后版本应该自动释放')
+})
+
+runTest('草稿更新版本号同步更新登记', () => {
+  const cr = draft.createDraft({
+    name: '版本更新测试草稿', version: 'v103.0.0',
+    userId: 'user1', userName: '用户1'
+  })
+  assert(cr.success, '创建应该成功')
+  assert(versionRegistry.getEntry('v103.0.0'), 'v103.0.0 应该被占用')
+
+  const ur = draft.updateDraft(cr.draft.id, { version: 'v103.1.0' }, { userId: 'user1', userName: '用户1' })
+  assert(ur.success, '更新版本应该成功')
+  assert(!versionRegistry.getEntry('v103.0.0'), '旧版本应该释放')
+  assert(versionRegistry.getEntry('v103.1.0'), '新版本应该被占用')
+
+  draft.deleteDraft(ur.draft.id, { userId: 'user1', userName: '用户1' })
+})
+
+console.log('\n--- 复制草稿版本占用测试 ---')
+
+runTest('复制草稿自动占用新版本', () => {
+  store.saveCommits([
+    { id: 'vr_dup_c1', message: 'feat: 复制测试', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const cr = draft.createDraft({
+    name: '复制源草稿', version: 'v104.0.0',
+    userId: 'user1', userName: '用户1'
+  })
+  assert(cr.success, '创建源草稿应该成功')
+  assert(versionRegistry.getEntry('v104.0.0'), '源版本被占用')
+
+  const dr = draft.duplicateDraft(cr.draft.id, '复制的新草稿', {
+    resolve: 'rename', userId: 'user2', userName: '用户2'
+  })
+  assert(dr.success, '使用 rename 策略复制应该成功')
+  assert(versionRegistry.getEntry('v104.0.0'), '源版本仍被占用')
+  assert(versionRegistry.getEntryByDraftId(dr.draft.id), '新草稿ID应该有对应登记')
+  const newEntry = versionRegistry.getEntryByDraftId(dr.draft.id)
+  assert(newEntry.version !== 'v104.0.0', '新草稿版本号应该与源不同')
+})
+
+runTest('复制草稿同版本冲突 - 普通用户', () => {
+  const cr = draft.createDraft({
+    name: '冲突目标草稿', version: 'v104.1.0',
+    userId: 'userA', userName: '用户A'
+  })
+  assert(cr.success, '创建冲突目标草稿应该成功')
+
+  const src = draft.createDraft({
+    name: '复制源2', version: 'v104.1.0',
+    userId: 'userB', userName: '用户B'
+  })
+  if (src.success) {
+    const dr = draft.duplicateDraft(src.draft.id, '新草稿名', {
+      resolve: 'cancel', userId: 'userB', userName: '用户B'
+    })
+    assert(!dr.success, '同版本冲突复制应该失败')
+    draft.deleteDraft(src.draft.id)
+  }
+  draft.deleteDraft(cr.draft.id)
+})
+
+console.log('\n--- 导入草稿版本占用测试 ---')
+
+runTest('导入草稿自动占用版本', () => {
+  store.saveCommits([
+    { id: 'vr_imp_c1', message: 'feat: 导入测试', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const cr = draft.createDraft({
+    name: '导入源草稿', version: 'v105.0.0'
+  })
+  const exp = draft.exportDraftToJson(cr.draft.id)
+  draft.deleteDraft(cr.draft.id)
+
+  const imp = draft.importDraftFromJson(exp.data, {
+    asName: '导入的草稿', userId: 'userImp', userName: '导入用户'
+  })
+  assert(imp.success, '导入应该成功')
+  const entry = versionRegistry.getEntry('v105.0.0')
+  assert(entry, '导入后版本应该被占用')
+  assert(entry.sourceAction === versionRegistry.SOURCE_IMPORT, '来源应该是 import')
+})
+
+runTest('导入同版本冲突 - 普通用户', () => {
+  store.saveCommits([
+    { id: 'vr_imp_c2', message: 'feat: 导入冲突测试', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const existing = draft.createDraft({
+    name: '已有草稿占用版本', version: 'v105.1.0'
+  })
+  const imp = draft.importDraftFromJson(draft.exportDraftToJson(existing.draft.id).data, {
+    asName: '新导入草稿', userId: 'otherUser', userName: '其他用户'
+  })
+  assert(!imp.success, '导入同版本冲突应该失败')
+  draft.deleteDraft(existing.draft.id)
+})
+
+runTest('导入同版本冲突 - 管理员接管', () => {
+  store.saveCommits([
+    { id: 'vr_imp_c3', message: 'feat: 导入管理员接管', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const existing = draft.createDraft({
+    name: '已有草稿', version: 'v105.2.0',
+    userId: 'oldUser', userName: '旧用户'
+  })
+  const exp = draft.exportDraftToJson(existing.draft.id)
+  const imp = draft.importDraftFromJson(exp.data, {
+    asName: '管理员接管导入', isAdmin: true, force: true,
+    takeoverReason: '导入需要接管此版本',
+    userId: 'admin', userName: '管理员'
+  })
+  assert(imp.success, '管理员接管导入应该成功')
+  const entry = versionRegistry.getEntry('v105.2.0')
+  assert(entry.userId === 'admin', '占用者应该更新为管理员')
+  draft.deleteDraft(existing.draft.id)
+  draft.deleteDraft(imp.draft.id)
+})
+
+console.log('\n--- 冲突分支和撤销测试 ---')
+
+runTest('日志记录完整性', () => {
+  const logs = versionRegistry.listLogs(50)
+  assert(Array.isArray(logs), '应该返回日志数组')
+  assert(logs.length > 0, '应该有操作日志')
+  const hasOccupy = logs.some(l => l.action === 'occupy')
+  const hasRelease = logs.some(l => l.action === 'release')
+  assert(hasOccupy, '应该有占用日志')
+  assert(hasRelease, '应该有释放日志')
+})
+
+runTest('最近一次操作可撤销 - 释放后撤销', () => {
+  const cr = draft.createDraft({
+    name: '撤销测试草稿', version: 'v106.0.0',
+    userId: 'userX', userName: '用户X'
+  })
+  assert(cr.success, '创建应该成功')
+  const beforeEntry = versionRegistry.getEntry('v106.0.0')
+
+  draft.deleteDraft(cr.draft.id)
+  const afterDelete = versionRegistry.getEntry('v106.0.0')
+  assert(!afterDelete, '删除后版本应该释放')
+
+  const peek = versionRegistry.peekUndo()
+  assert(peek, '应该有可撤销操作')
+  assert(peek.action === 'release', '可撤销动作应该是 release')
+
+  const undo = versionRegistry.undoLastChange({ userId: 'userX', userName: '用户X' })
+  assert(undo.success, '撤销应该成功')
+  const restored = versionRegistry.getEntry('v106.0.0')
+  assert(restored, '撤销后版本占用应该恢复')
+  assert(restored.userId === beforeEntry.userId, '占用者应该恢复')
+
+  draft.deleteDraft(cr.draft.id)
+  versionRegistry.releaseVersion('v106.0.0', { isAdmin: true, reason: '清理测试' })
+})
+
+runTest('最近一次操作可撤销 - 接管后撤销', () => {
+  versionRegistry.occupyVersion('v106.1.0', {
+    userId: 'user1', userName: '用户1', sourceAction: versionRegistry.SOURCE_CREATE,
+    draftName: '草稿1', draftId: 'd_vr7_1'
+  })
+  const takeover = versionRegistry.takeoverVersion('v106.1.0', {
+    userId: 'admin', userName: '管理员', reason: '测试撤销接管'
+  })
+  assert(takeover.success, '接管应该成功')
+
+  const undo = versionRegistry.undoLastChange()
+  assert(undo.success, '撤销接管应该成功')
+  const restored = versionRegistry.getEntry('v106.1.0')
+  assert(restored.userId === 'user1', '占用者应该恢复到接管前')
+
+  versionRegistry.releaseVersion('v106.1.0', { isAdmin: true, reason: '清理测试' })
+})
+
+console.log('\n--- JSON 导入导出测试 ---')
+
+runTest('导出版本登记数据', () => {
+  versionRegistry.occupyVersion('v107.0.0', {
+    userId: 'userA', userName: '用户A', sourceAction: versionRegistry.SOURCE_MANUAL,
+    draftName: '导出测试草稿', draftId: 'd_vr8_0'
+  })
+  const exp = versionRegistry.exportRegistryToJson()
+  assert(exp.schemaVersion, '应该有 schemaVersion')
+  assert(Array.isArray(exp.entries), 'entries 应该是数组')
+  assert(exp.entries.some(e => e.version === 'v107.0.0'), '应该包含 v107.0.0')
+  versionRegistry.releaseVersion('v107.0.0', { isAdmin: true, reason: '清理' })
+})
+
+runTest('导入版本登记数据 - 无冲突', () => {
+  const data = {
+    schemaVersion: 1,
+    entries: [
+      {
+        version: 'v108.0.0', status: 'occupied', userId: 'importUser',
+        userName: '导入用户', sourceAction: 'manual', draftName: '导入测试',
+        draftId: 'd_import_1', createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(), history: []
+      }
+    ]
+  }
+  const imp = versionRegistry.importRegistryFromJson(data, {
+    userId: 'admin', userName: '管理员'
+  })
+  assert(imp.success, '导入应该成功')
+  assert(imp.importedCount === 1, '应该导入1条')
+  const entry = versionRegistry.getEntry('v108.0.0')
+  assert(entry, '导入后应该可以查到')
+  versionRegistry.releaseVersion('v108.0.0', { isAdmin: true, reason: '清理' })
+})
+
+runTest('导入版本登记数据 - 冲突不覆盖', () => {
+  versionRegistry.occupyVersion('v108.1.0', {
+    userId: 'existUser', userName: '已有用户', sourceAction: versionRegistry.SOURCE_CREATE
+  })
+  const data = {
+    schemaVersion: 1,
+    entries: [{
+      version: 'v108.1.0', status: 'occupied', userId: 'newUser',
+      userName: '新用户', sourceAction: 'manual', createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), history: []
+    }]
+  }
+  const imp = versionRegistry.importRegistryFromJson(data, { force: false })
+  assert(imp.success, '导入过程应该成功')
+  assert(imp.conflictCount === 1, '应该有1个冲突')
+  assert(imp.skipped === 1, '应该跳过1条')
+  const entry = versionRegistry.getEntry('v108.1.0')
+  assert(entry.userId === 'existUser', '冲突未覆盖，占用者应该保持不变')
+  versionRegistry.releaseVersion('v108.1.0', { isAdmin: true, reason: '清理' })
+})
+
+runTest('导入版本登记数据 - 冲突强制覆盖', () => {
+  versionRegistry.occupyVersion('v108.2.0', {
+    userId: 'existUser', userName: '已有用户', sourceAction: versionRegistry.SOURCE_CREATE
+  })
+  const data = {
+    schemaVersion: 1,
+    entries: [{
+      version: 'v108.2.0', status: 'occupied', userId: 'newUser',
+      userName: '新用户', sourceAction: 'manual', createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), history: []
+    }]
+  }
+  const imp = versionRegistry.importRegistryFromJson(data, { force: true, isAdmin: true })
+  assert(imp.success, '强制覆盖导入应该成功')
+  const entry = versionRegistry.getEntry('v108.2.0')
+  assert(entry.userId === 'newUser', '强制覆盖后占用者应该更新')
+  versionRegistry.releaseVersion('v108.2.0', { isAdmin: true, reason: '清理' })
+})
+
+console.log('\n--- 跨重启一致性恢复测试 ---')
+
+runTest('reconcile 清理无效登记（草稿不存在）', () => {
+  versionRegistry.occupyVersion('v109.0.0', {
+    userId: 'user', userName: '用户', sourceAction: versionRegistry.SOURCE_CREATE,
+    draftName: '不存在的草稿', draftId: 'd_nonexistent_vr10'
+  })
+  assert(versionRegistry.getEntry('v109.0.0'), '清理前登记存在')
+
+  const drafts = draft.listDrafts()
+  const result = versionRegistry.reconcileWithDrafts(drafts)
+  assert(result.staleRemoved >= 1, '应该清理至少1条无效登记')
+  assert(!versionRegistry.getEntry('v109.0.0'), '清理后无效登记应该被移除')
+})
+
+runTest('reconcile 恢复缺失登记（草稿存在但无登记）', () => {
+  const cr = draft.createDraft({
+    name: '缺失登记测试草稿', version: 'v109.1.0',
+    userId: 'user1', userName: '用户1'
+  })
+  versionRegistry.releaseVersion('v109.1.0', { isAdmin: true, reason: '模拟丢失登记' })
+  assert(!versionRegistry.getEntry('v109.1.0'), '模拟丢失登记后应该不存在')
+
+  const drafts = draft.listDrafts()
+  const result = versionRegistry.reconcileWithDrafts(drafts)
+  assert(result.missingRestored >= 1, '应该恢复至少1条缺失登记')
+  const restored = versionRegistry.getEntry('v109.1.0')
+  assert(restored, '恢复后登记应该存在')
+  assert(restored.draftId === cr.draft.id, '草稿ID应该匹配')
+
+  draft.deleteDraft(cr.draft.id)
+})
+
+runTest('draft.reconcileRegistry 便捷接口可用', () => {
+  const cr = draft.createDraft({
+    name: '便捷接口测试', version: 'v109.2.0'
+  })
+  versionRegistry.releaseVersion('v109.2.0', { isAdmin: true, reason: '测试便捷接口' })
+  draft.reconcileRegistry()
+  assert(versionRegistry.getEntry('v109.2.0'), '便捷接口应该恢复登记')
+  draft.deleteDraft(cr.draft.id)
+})
+
+runTest('持久化后重启一致性', () => {
+  versionRegistry.occupyVersion('v110.0.0', {
+    userId: 'persistUser', userName: '持久化用户',
+    sourceAction: versionRegistry.SOURCE_MANUAL, draftName: '持久化测试草稿'
+  })
+
+  delete require.cache[require.resolve('../src/versionRegistry')]
+  delete require.cache[require.resolve('../src/store')]
+  const vr2 = require('../src/versionRegistry')
+
+  const entry = vr2.getEntry('v110.0.0')
+  assert(entry, '重启后应该能读取到登记')
+  assert(entry.userId === 'persistUser', '占用者信息应该一致')
+
+  const logs = vr2.listLogs(10)
+  assert(logs.length > 0, '重启后日志应该存在')
+
+  vr2.releaseVersion('v110.0.0', { isAdmin: true, reason: '清理' })
+})
+
+console.log('\n--- 撤销后回归验证 ---')
+
+runTest('撤销释放后再创建草稿版本冲突', () => {
+  const cr = draft.createDraft({
+    name: '撤销回归测试草稿', version: 'v111.0.0',
+    userId: 'userA', userName: '用户A'
+  })
+  draft.deleteDraft(cr.draft.id)
+  versionRegistry.undoLastChange()
+
+  const attempt = draft.createDraft({
+    name: '新草稿尝试占用', version: 'v111.0.0',
+    userId: 'userB', userName: '用户B'
+  })
+  assert(!attempt.success, '撤销释放后同版本创建应该冲突')
+
+  versionRegistry.releaseVersion('v111.0.0', { isAdmin: true, reason: '清理' })
+  const success = draft.createDraft({
+    name: '最终成功的草稿', version: 'v111.0.0'
+  })
+  assert(success.success, '清理后应该能创建成功')
+  draft.deleteDraft(success.draft.id)
+})
+
+runTest('撤销接管后原占用者恢复', () => {
+  versionRegistry.occupyVersion('v111.1.0', {
+    userId: 'owner', userName: '原占用者', sourceAction: versionRegistry.SOURCE_CREATE,
+    draftName: '原草稿', draftId: 'd_owner'
+  })
+  versionRegistry.takeoverVersion('v111.1.0', {
+    userId: 'admin', userName: '管理员', reason: '测试撤销接管回归'
+  })
+  assert(versionRegistry.getEntry('v111.1.0').userId === 'admin', '接管后占用者是admin')
+
+  versionRegistry.undoLastChange()
+  assert(versionRegistry.getEntry('v111.1.0').userId === 'owner', '撤销后原占用者恢复')
+
+  versionRegistry.releaseVersion('v111.1.0', { isAdmin: true, reason: '清理' })
+})
+
+console.log('\n--- 现有功能回归验证（归档/导出/审校）---')
+
+runTest('归档功能不受版本登记影响', () => {
+  store.saveCommits([
+    { id: 'vr_reg_arc', message: 'feat: 回归归档', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const cr = draft.createDraft({ name: '归档回归草稿', version: 'v112.0.0' })
+  assert(cr.success, '创建归档草稿应该成功')
+  const ar = draft.archiveDraft(cr.draft.id)
+  assert(ar.success, '归档应该成功')
+  assert(ar.snapshot, '应该返回快照')
+  const archives = archiver.listArchives()
+  assert(archives.some(a => a.version === 'v112.0.0'), '归档列表应该包含 v112.0.0')
+})
+
+runTest('Markdown 导出功能正常', () => {
+  const archives = archiver.listArchives()
+  assert(archives.length > 0, '应该至少有一个归档')
+  const md = exporter.generateMarkdown(archives[0].version)
+  assert(typeof md === 'string', 'Markdown 导出应该返回字符串')
+  assert(md.includes('#'), 'Markdown 应该包含标题')
+})
+
+runTest('草稿审校对比功能正常', () => {
+  store.saveCommits([
+    { id: 'vr_reg_rev1', message: 'feat: 审校测试1', category: 'feature', source: 'test', author: 'a', date: '2025-01-01', reviewed: true, ticket: 'T-1', issues: [], resolved: true }
+  ])
+  const d1 = draft.createDraft({ name: '审校对比A', version: 'v113.0.0' })
+  store.saveCommits([
+    { id: 'vr_reg_rev2', message: 'fix: 审校测试2', category: 'fix', source: 'test', author: 'b', date: '2025-01-02', reviewed: true, ticket: 'T-2', issues: [], resolved: true }
+  ])
+  const d2 = draft.createDraft({ name: '审校对比B', version: 'v113.1.0' })
+  const cmp = draft.compareDrafts(d1.draft.id, d2.draft.id)
+  assert(cmp.success, '对比应该成功')
+  assert(cmp.diff, '应该返回差异数据')
+  draft.deleteDraft(d1.draft.id)
+  draft.deleteDraft(d2.draft.id)
+})
+
+console.log('\n=== 版本占用登记中心所有回归测试通过! ===')
 
 cleanTestData()

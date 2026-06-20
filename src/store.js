@@ -276,6 +276,54 @@ function clearDraftUndoStack() {
   }
 }
 
+function loadVersionRegistry() {
+  return load('version_registry') || { entries: [] }
+}
+
+function saveVersionRegistry(data) {
+  save('version_registry', data)
+}
+
+function loadVersionRegistryLogs() {
+  return load('version_registry_logs') || []
+}
+
+function saveVersionRegistryLogs(logs) {
+  save('version_registry_logs', logs)
+}
+
+function appendVersionRegistryLog(entry) {
+  const logs = loadVersionRegistryLogs()
+  logs.push(entry)
+  if (logs.length > 200) {
+    logs.splice(0, logs.length - 200)
+  }
+  saveVersionRegistryLogs(logs)
+  return logs
+}
+
+function clearVersionRegistryLogs() {
+  const fp = filePath('version_registry_logs')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
+function loadVersionRegistryUndo() {
+  return load('version_registry_undo') || null
+}
+
+function saveVersionRegistryUndo(snapshot) {
+  save('version_registry_undo', snapshot)
+}
+
+function clearVersionRegistryUndo() {
+  const fp = filePath('version_registry_undo')
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp)
+  }
+}
+
 module.exports = {
   loadCommits,
   saveCommits,
@@ -315,6 +363,15 @@ module.exports = {
   loadDraftUndoStack,
   saveDraftUndoStack,
   clearDraftUndoStack,
+  loadVersionRegistry,
+  saveVersionRegistry,
+  loadVersionRegistryLogs,
+  saveVersionRegistryLogs,
+  appendVersionRegistryLog,
+  clearVersionRegistryLogs,
+  loadVersionRegistryUndo,
+  saveVersionRegistryUndo,
+  clearVersionRegistryUndo,
   DATA_DIR,
   BACKUPS_DIR
 }

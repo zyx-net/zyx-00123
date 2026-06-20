@@ -13,6 +13,7 @@ const store = require('../src/store')
 const configBackup = require('../src/configBackup')
 const exportProfile = require('../src/exportProfile')
 const draft = require('../src/draft')
+const versionRegistry = require('../src/versionRegistry')
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'help'
@@ -141,24 +142,55 @@ function printHelp() {
       选项:
         --version <ver>                目标版本号
         --desc <description>           补充说明
-        --force                        同名/同版本时覆盖
+        --force                        同名/同版本时覆盖 (需 --admin)
+        --admin                        以管理员身份操作 (可强制接管)
+        --reason <text>                管理员接管时的理由
+        --user <name>                  指定操作用户名
     draft update <name|id> [options]    更新草稿
       选项同 create，另加 --name <newName> 可重命名
     draft delete <name|id>              删除草稿
     draft duplicate <name|id> [newName]  复制草稿
       可选: --resolve <cancel|rename|overwrite>  冲突处理策略 (默认 cancel)
+      可选: --admin --reason <text>   管理员强制接管版本冲突
+      可选: --user <name>              指定操作用户名
     draft apply <name|id>               应用草稿到工作区
     draft archive <name|id>             从草稿一键归档
     draft export <name|id> [outputPath]  导出草稿为 JSON
     draft import <file|json> [options]  导入草稿 JSON
       可选: --name <customName>        导入时重命名
-      可选: --force                     同名/同版本时覆盖
+      可选: --force                     同名/同版本时覆盖 (需 --admin)
+      可选: --admin --reason <text>   管理员强制接管
+      可选: --user <name>              指定操作用户名
     draft compare <id1|name1> <id2|name2>  比较两个草稿的差异
     draft bench <id1|name1> <id2|name2>  审校台: 比较、复制、确认一条链路
       可选: --resolve <cancel|rename|overwrite>  复制冲突处理策略
     draft logs [n]                      查看最近 n 条草稿操作日志 (默认 10)
     draft undo                          撤销最近一次草稿操作
     draft undo-peek                     查看可撤销的草稿操作
+
+  版本占用登记中心:
+    version list                        查看所有版本占用情况
+    version show <version>              查看指定版本的占用详情
+    version check <version>             检查版本是否可用
+    version preoccupy <version> [options]  预占版本号 (新建/复制/导入前可先锁定)
+      可选: --user <name>              指定操作用户名
+      可选: --draft-name <name>        关联草稿名 (可选)
+    version release <version> [options]  释放版本占用
+      可选: --user <name>              指定操作用户名
+      可选: --admin                    管理员强制释放他人占用
+      可选: --reason <text>            释放理由
+    version takeover <version> --reason <text> [options]  管理员强制接管版本
+      必选: --reason <text>            接管理由 (必填)
+      可选: --user <name>              指定操作用户名
+      可选: --draft-name <name>        关联草稿名
+      可选: --draft-id <id>            关联草稿ID
+    version logs [n]                    查看最近 n 条版本操作日志 (默认 50)
+    version undo                        撤销最近一次版本占用/释放/接管操作
+    version undo-peek                   查看可撤销的版本操作
+    version export [outputPath]         导出版本占用登记为 JSON
+    version import <file|json> [options]  导入版本占用登记 JSON
+      可选: --force                     冲突时覆盖
+    version reconcile                   跨重启数据一致性校验与恢复
 
   其他:
     web [port]                           启动 Web 界面 (默认 3000)
@@ -1028,7 +1060,16 @@ function run() {
           const input = buildDraftFromArgs(args)
           input.name = name
           const force = args.indexOf('--force') >= 0
-          const result = draft.createDraft({ ...input, force })
+          const isAdmin = args.indexOf('--admin') >= 0
+          const userIdx = args.indexOf('--user')
+          const reasonIdx = args.indexOf('--reason')
+          const opts = { force, isAdmin }
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
+          const result = draft.createDraft({ ...input, ...opts })
           printResultLogs(result)
           if (result.success) {
             if (result.overwritten) {
@@ -1037,13 +1078,15 @@ function run() {
               ok(`已创建草稿: ${result.draft.name} (${result.draft.id})`)
             }
             out(`  提交数: ${result.draft.commits.length}`)
+            if (result.draft.version) out(`  版本: ${result.draft.version}`)
           } else {
             err('创建失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
             if (result.blocked && result.reason === 'duplicate_name') {
               yellow('提示: 使用 --force 可覆盖同名草稿')
             }
-            if (result.blocked && result.reason === 'duplicate_version') {
-              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            if (result.blocked && result.reason === 'version_occupied') {
+              yellow('提示: 版本已被占用。可修改版本号、修改草稿名，或使用 --admin --force --reason "<理由>" 以管理员身份强制接管')
             }
           }
         } catch (e) {
@@ -1057,17 +1100,28 @@ function run() {
         try {
           const updates = buildDraftFromArgs(args)
           const force = args.indexOf('--force') >= 0
-          const result = draft.updateDraft(resolved.id, updates, { force })
+          const isAdmin = args.indexOf('--admin') >= 0
+          const userIdx = args.indexOf('--user')
+          const reasonIdx = args.indexOf('--reason')
+          const opts = { force, isAdmin }
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
+          const result = draft.updateDraft(resolved.id, updates, opts)
           printResultLogs(result)
           if (result.success) {
             ok(`已更新草稿: ${result.draft.name} (${result.draft.id})`)
+            if (result.draft.version) out(`  版本: ${result.draft.version}`)
           } else {
             err('更新失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
             if (result.blocked && result.reason === 'duplicate_name') {
               yellow('提示: 使用 --force 可覆盖同名草稿')
             }
-            if (result.blocked && result.reason === 'duplicate_version') {
-              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            if (result.blocked && result.reason === 'version_occupied') {
+              yellow('提示: 版本已被占用。可修改版本号，或使用 --admin --force --reason "<理由>" 以管理员身份强制接管')
             }
           }
         } catch (e) {
@@ -1079,10 +1133,17 @@ function run() {
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
-          const result = draft.deleteDraft(resolved.id)
+          const userIdx = args.indexOf('--user')
+          const opts = {}
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          const result = draft.deleteDraft(resolved.id, opts)
           printResultLogs(result)
           if (result.success) {
             ok(`已删除草稿: ${result.deleted.name}`)
+            if (result.deleted.version) out(`  已释放版本: ${result.deleted.version}`)
           } else {
             err('删除失败')
           }
@@ -1098,11 +1159,20 @@ function run() {
         try {
           const resolveIdx = args.indexOf('--resolve')
           const resolve = resolveIdx >= 0 && args[resolveIdx + 1] ? args[resolveIdx + 1] : 'cancel'
-          if (!['cancel', 'rename', 'overwrite'].includes(resolve)) {
-            err('--resolve 只能是 cancel、rename 或 overwrite')
+          if (!['cancel', 'rename', 'overwrite', 'force'].includes(resolve)) {
+            err('--resolve 只能是 cancel、rename、overwrite 或 force (管理员)')
             break
           }
-          const result = draft.duplicateDraft(resolved.id, newName, { resolve })
+          const isAdmin = args.indexOf('--admin') >= 0
+          const userIdx = args.indexOf('--user')
+          const reasonIdx = args.indexOf('--reason')
+          const opts = { resolve, isAdmin }
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
+          const result = draft.duplicateDraft(resolved.id, newName, opts)
           printResultLogs(result)
           if (result.success) {
             if (result.overwritten) {
@@ -1110,18 +1180,21 @@ function run() {
             } else {
               ok(`已复制草稿: ${resolved.draft.name} → ${result.draft.name} (${result.draft.id})`)
             }
+            if (result.draft.version) out(`  版本: ${result.draft.version}`)
           } else {
             err('复制失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
             if (result.blocked) {
               if (result.conflictDetails) {
                 if (result.conflictDetails.nameConflict) {
                   yellow(`  同名冲突: ${result.conflictDetails.nameConflict.existingName} (${result.conflictDetails.nameConflict.existingId})`)
                 }
                 if (result.conflictDetails.versionConflict) {
-                  yellow(`  同版本冲突: ${result.conflictDetails.versionConflict.existingVersion} (${result.conflictDetails.versionConflict.existingName})`)
+                  const vc = result.conflictDetails.versionConflict
+                  yellow(`  版本冲突: ${vc.existingVersion} 已被 ${vc.occupier || '他人'} 占用 (草稿: ${vc.existingName || '未知'})`)
                 }
               }
-              yellow('提示: 使用 --resolve rename 自动改名, 或 --resolve overwrite 覆盖同名草稿')
+              yellow('提示: 可修改版本号或使用 --resolve rename 自动改名。管理员可用 --resolve force --admin --reason "<理由>" 强制接管')
             }
           }
         } catch (e) {
@@ -1151,11 +1224,18 @@ function run() {
         const resolved = resolveDraftIdentifier(ident)
         if (!resolved) { err(`草稿不存在: ${ident}`); break }
         try {
-          const result = draft.archiveDraft(resolved.id)
+          const userIdx = args.indexOf('--user')
+          const opts = {}
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          const result = draft.archiveDraft(resolved.id, opts)
           printResultLogs(result)
           if (result.success) {
             ok(`已从草稿归档: ${result.draft.version}`)
             out(`  提交数: ${result.snapshot.commitCount}`)
+            out(`  版本占用已释放`)
           } else {
             err('归档失败')
           }
@@ -1189,13 +1269,23 @@ function run() {
         }
       } else if (sub === 'import') {
         const target = args[2]
-        if (!target) { err('用法: draft import <file|json> [--name customName] [--force]'); break }
+        if (!target) { err('用法: draft import <file|json> [--name customName] [--force] [--admin] [--reason <text>] [--user <name>]'); break }
         try {
           const fs = require('fs')
           const pathMod = require('path')
           const nameIdx = args.indexOf('--name')
-          const opts = { force: args.indexOf('--force') >= 0 }
+          const userIdx = args.indexOf('--user')
+          const reasonIdx = args.indexOf('--reason')
+          const opts = {
+            force: args.indexOf('--force') >= 0,
+            isAdmin: args.indexOf('--admin') >= 0
+          }
           if (nameIdx >= 0 && args[nameIdx + 1]) opts.asName = args[nameIdx + 1]
+          if (userIdx >= 0 && args[userIdx + 1]) {
+            opts.userId = args[userIdx + 1]
+            opts.userName = args[userIdx + 1]
+          }
+          if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.takeoverReason = args[reasonIdx + 1]
           let result
           let isFile = false
           if (fs.existsSync(target)) {
@@ -1219,13 +1309,15 @@ function run() {
           printResultLogs(result)
           if (result.success) {
             ok(`已导入草稿: ${result.draft.name} (${result.draft.id})`)
+            if (result.draft.version) out(`  版本: ${result.draft.version}`)
           } else {
             err('导入失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
             if (result.blocked && result.reason === 'duplicate_name') {
               yellow('提示: 使用 --force 可覆盖同名草稿，或使用 --name 指定新名称')
             }
-            if (result.blocked && result.reason === 'duplicate_version') {
-              yellow('提示: 使用 --force 可覆盖同版本草稿')
+            if (result.blocked && result.reason === 'version_occupied') {
+              yellow('提示: 版本已被占用。可使用 --name 修改草稿名或修改版本号，或使用 --admin --force --reason "<理由>" 以管理员身份强制接管')
             }
           }
         } catch (e) {
@@ -1440,6 +1532,309 @@ function run() {
         }
       } else {
         err('未知 draft 子命令。使用: list | show | create | update | delete | duplicate | apply | archive | export | import | compare | bench | logs | undo | undo-peek')
+      }
+      break
+    }
+
+    case 'version': {
+      const sub = args[1]
+      if (!sub) {
+        err('用法: version list|show|check|preoccupy|release|takeover|logs|undo|undo-peek|export|import|reconcile')
+        break
+      }
+
+      function extractCommonOpts() {
+        const opts = {}
+        const userIdx = args.indexOf('--user')
+        const adminIdx = args.indexOf('--admin')
+        const reasonIdx = args.indexOf('--reason')
+        const forceIdx = args.indexOf('--force')
+        if (userIdx >= 0 && args[userIdx + 1]) {
+          opts.userName = args[userIdx + 1]
+          opts.userId = args[userIdx + 1]
+        }
+        if (adminIdx >= 0) opts.isAdmin = true
+        if (reasonIdx >= 0 && args[reasonIdx + 1]) opts.reason = args[reasonIdx + 1]
+        if (forceIdx >= 0) opts.force = true
+        return opts
+      }
+
+      const actionLabels = {
+        occupy: '占用', preoccupy: '预占', release: '释放',
+        takeover: '接管', update: '更新', undo: '撤销',
+        import: '导入', export: '导出', reconcile: '一致性恢复'
+      }
+
+      if (sub === 'list') {
+        try {
+          const list = versionRegistry.listEntries()
+          if (list.length === 0) {
+            yellow('暂无版本占用记录')
+          } else {
+            out(`共有 ${list.length} 个版本占用记录:`)
+            list.forEach((e, i) => {
+              const statusLabel = e.status === versionRegistry.STATUS_PREOCCUPIED ? '[预占]' : '[占用]'
+              out(`  ${i + 1}. ${statusLabel} ${e.version}`)
+              out(`     占用者: ${e.userName} (${e.userId})`)
+              out(`     来源动作: ${e.sourceAction} | 状态: ${e.status}`)
+              out(`     关联草稿: ${e.draftName || '(无)'} (${e.draftId || 'N/A'})`)
+              out(`     创建: ${e.createdAt} | 更新: ${e.updatedAt}`)
+            })
+          }
+        } catch (e) {
+          err(`读取失败: ${e.message}`)
+        }
+      } else if (sub === 'show') {
+        const ver = args[2]
+        if (!ver) { err('用法: version show <version>'); break }
+        try {
+          const entry = versionRegistry.getEntry(ver)
+          if (!entry) {
+            yellow(`版本 ${ver} 未被占用`)
+          } else {
+            const statusLabel = entry.status === versionRegistry.STATUS_PREOCCUPIED ? '预占' : '占用'
+            out(`版本 ${ver} 登记详情:`)
+            out(`  状态: ${statusLabel}`)
+            out(`  登记ID: ${entry.id}`)
+            out(`  占用者: ${entry.userName} (${entry.userId})`)
+            out(`  来源动作: ${entry.sourceAction}`)
+            out(`  关联草稿: ${entry.draftName || '(无)'} (${entry.draftId || 'N/A'})`)
+            out(`  创建时间: ${entry.createdAt}`)
+            out(`  最近更新: ${entry.updatedAt}`)
+            if (entry.history && entry.history.length > 0) {
+              out(`  处理记录 (最近 ${entry.history.length} 条):`)
+              entry.history.slice().reverse().forEach((h, i) => {
+                const lbl = actionLabels[h.action] || h.action
+                out(`    ${i + 1}. [${lbl}] ${h.timestamp}`)
+                out(`       用户: ${h.userName || h.userId || '(系统)'}`)
+                if (h.reason) out(`       理由: ${h.reason}`)
+                if (h.previousVersion) out(`       版本变更: ${h.previousVersion} → ${h.newVersion}`)
+              })
+            }
+          }
+        } catch (e) {
+          err(`读取失败: ${e.message}`)
+        }
+      } else if (sub === 'check') {
+        const ver = args[2]
+        if (!ver) { err('用法: version check <version>'); break }
+        try {
+          const result = versionRegistry.checkAvailability(ver)
+          if (result.available) {
+            if (result.reason === 'no_version') {
+              yellow('未指定版本号')
+            } else if (result.selfOccupied) {
+              ok(`版本 ${ver} 可使用（当前用户已占用）`)
+            } else {
+              ok(`版本 ${ver} 可用`)
+            }
+          } else {
+            err(`版本 ${ver} 已被占用`)
+            out(`  占用者: ${result.occupier}`)
+            out(`  来源动作: ${result.sourceAction || '未知'}`)
+            out(`  关联草稿: ${result.draftName || '(未知)'}`)
+            out(`  最近更新: ${result.updatedAt}`)
+          }
+        } catch (e) {
+          err(`检查失败: ${e.message}`)
+        }
+      } else if (sub === 'preoccupy') {
+        const ver = args[2]
+        if (!ver) { err('用法: version preoccupy <version> [--user <name>] [--draft-name <name>]'); break }
+        try {
+          const opts = extractCommonOpts()
+          const draftNameIdx = args.indexOf('--draft-name')
+          if (draftNameIdx >= 0 && args[draftNameIdx + 1]) opts.draftName = args[draftNameIdx + 1]
+          const result = versionRegistry.preoccupyVersion(ver, opts)
+          if (result.success) {
+            ok(`已预占版本 ${ver}`)
+            out(`  登记ID: ${result.entry.id}`)
+            out(`  占用者: ${result.entry.userName}`)
+          } else {
+            err('预占失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+            if (result.blocked && result.reason === 'version_occupied') {
+              yellow('提示: 仅管理员可使用 version takeover 强制接管')
+            }
+          }
+        } catch (e) {
+          err(`预占失败: ${e.message}`)
+        }
+      } else if (sub === 'release') {
+        const ver = args[2]
+        if (!ver) { err('用法: version release <version> [--user <name>] [--admin] [--reason <text>]'); break }
+        try {
+          const opts = extractCommonOpts()
+          const result = versionRegistry.releaseVersion(ver, opts)
+          if (result.success) {
+            ok(`已释放版本 ${ver}`)
+            if (result.released) {
+              out(`  原占用者: ${result.released.userName}`)
+              out(`  原关联草稿: ${result.released.draftName || '(无)'}`)
+            }
+          } else {
+            err('释放失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+          }
+        } catch (e) {
+          err(`释放失败: ${e.message}`)
+        }
+      } else if (sub === 'takeover') {
+        const ver = args[2]
+        if (!ver) { err('用法: version takeover <version> --reason <text> [--user <name>] [--draft-name <name>] [--draft-id <id>]'); break }
+        try {
+          const opts = extractCommonOpts()
+          opts.isAdmin = true
+          if (!opts.reason) {
+            err('必须通过 --reason 指定接管理由')
+            break
+          }
+          const draftNameIdx = args.indexOf('--draft-name')
+          const draftIdIdx = args.indexOf('--draft-id')
+          if (draftNameIdx >= 0 && args[draftNameIdx + 1]) opts.draftName = args[draftNameIdx + 1]
+          if (draftIdIdx >= 0 && args[draftIdIdx + 1]) opts.draftId = args[draftIdIdx + 1]
+          const result = versionRegistry.takeoverVersion(ver, opts)
+          if (result.success) {
+            if (result.tookOver) {
+              ok(`已成功接管版本 ${ver}`)
+            } else {
+              ok(`已登记版本 ${ver}（无冲突，直接占用）`)
+            }
+            out(`  登记ID: ${result.entry.id}`)
+            out(`  占用者: ${result.entry.userName}`)
+            if (opts.reason) out(`  理由: ${opts.reason}`)
+          } else {
+            err('接管失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+          }
+        } catch (e) {
+          err(`接管失败: ${e.message}`)
+        }
+      } else if (sub === 'logs') {
+        const nStr = args[2]
+        const n = nStr ? parseInt(nStr, 10) : 50
+        try {
+          const logs = versionRegistry.listLogs(isNaN(n) ? 50 : n)
+          if (logs.length === 0) {
+            yellow('暂无版本操作日志')
+          } else {
+            out(`最近 ${logs.length} 条版本操作日志:`)
+            logs.forEach((l, i) => {
+              const lbl = actionLabels[l.action] || l.action
+              out(`  ${i + 1}. [${lbl}] ${l.timestamp}`)
+              if (l.version) out(`     版本: ${l.version}`)
+              if (l.userName) out(`     用户: ${l.userName}`)
+              if (l.draftName) out(`     草稿: ${l.draftName}`)
+              if (l.reason) out(`     理由: ${l.reason}`)
+              if (l.description) out(`     描述: ${l.description}`)
+              if (l.importedCount !== undefined) out(`     导入: ${l.importedCount} 条，跳过: ${l.skipped || 0}，冲突: ${l.conflictCount || 0}`)
+              if (l.staleRemoved !== undefined) out(`     清理陈旧: ${l.staleRemoved}，恢复缺失: ${l.missingRestored || 0}`)
+            })
+          }
+        } catch (e) {
+          err(`读取日志失败: ${e.message}`)
+        }
+      } else if (sub === 'undo') {
+        try {
+          const opts = extractCommonOpts()
+          const result = versionRegistry.undoLastChange(opts)
+          if (result.success) {
+            ok(`已撤销: ${result.description}`)
+            out(`  动作: ${actionLabels[result.action] || result.action}`)
+            out(`  版本: ${result.version}`)
+            out(`  操作时间: ${result.timestamp}`)
+          } else {
+            err(`撤销失败: ${result.reason || '未知错误'}`)
+          }
+        } catch (e) {
+          err(`撤销失败: ${e.message}`)
+        }
+      } else if (sub === 'undo-peek') {
+        try {
+          const snap = versionRegistry.peekUndo()
+          if (!snap) {
+            yellow('没有可撤销的版本登记操作')
+          } else {
+            out(`可撤销的版本操作:`)
+            out(`  动作: ${actionLabels[snap.action] || snap.action}`)
+            out(`  版本: ${snap.version}`)
+            out(`  描述: ${snap.description}`)
+            out(`  操作时间: ${snap.timestamp}`)
+          }
+        } catch (e) {
+          err(`读取失败: ${e.message}`)
+        }
+      } else if (sub === 'export') {
+        const outputPath = args[2]
+        try {
+          if (outputPath) {
+            const r = versionRegistry.exportRegistryToFile(outputPath)
+            if (r.success) {
+              ok(`版本登记已导出到文件: ${r.path}`)
+            } else {
+              err(`导出失败: ${(r.errors || []).join('; ')}`)
+            }
+          } else {
+            const r = versionRegistry.exportRegistryToJson()
+            out(JSON.stringify(r, null, 2))
+          }
+        } catch (e) {
+          err(`导出失败: ${e.message}`)
+        }
+      } else if (sub === 'import') {
+        const target = args[2]
+        if (!target) { err('用法: version import <file|json> [--force]'); break }
+        try {
+          const opts = extractCommonOpts()
+          const fs = require('fs')
+          const pathMod = require('path')
+          let result
+          let isFile = false
+          if (fs.existsSync(target)) {
+            isFile = true
+          } else if (target.includes('/') || target.includes('\\') || target.endsWith('.json')) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            if (fs.existsSync(absPath)) isFile = true
+          }
+          if (isFile) {
+            const absPath = pathMod.isAbsolute(target) ? target : pathMod.resolve(process.cwd(), target)
+            result = versionRegistry.importRegistryFromFile(absPath, opts)
+          } else {
+            try {
+              const data = JSON.parse(target)
+              result = versionRegistry.importRegistryFromJson(data, opts)
+            } catch (parseErr) {
+              err(`无法解析输入: 既不是文件路径也不是合法 JSON`)
+              break
+            }
+          }
+          if (result.success) {
+            ok(`导入完成: 成功 ${result.importedCount} 条，跳过 ${result.skipped} 条`)
+            if (result.conflictCount > 0) {
+              yellow(`  冲突版本: ${result.conflicts.join(', ')}`)
+              if (!opts.force) yellow('  提示: 使用 --force 可覆盖冲突版本')
+            }
+          } else {
+            err('导入失败')
+            result.errors.forEach(e => err(`  ✗ ${e}`))
+          }
+        } catch (e) {
+          err(`导入失败: ${e.message}`)
+        }
+      } else if (sub === 'reconcile') {
+        try {
+          draft.reconcileRegistry()
+          const result = versionRegistry.listEntries()
+          ok(`一致性校验完成`)
+          out(`  当前有效版本占用: ${result.length} 个`)
+          result.forEach(e => {
+            out(`    - ${e.version}: ${e.draftName || '(无草稿关联)'} (${e.userName})`)
+          })
+        } catch (e) {
+          err(`校验失败: ${e.message}`)
+        }
+      } else {
+        err('未知 version 子命令。使用: list | show | check | preoccupy | release | takeover | logs | undo | undo-peek | export | import | reconcile')
       }
       break
     }

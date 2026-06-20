@@ -75,6 +75,11 @@ document.querySelectorAll('.tab').forEach(btn => {
       benchRefreshUndo()
       benchLoadLogs()
     }
+    if (btn.dataset.tab === 'version') {
+      vrRefresh()
+      vrPeekUndo()
+      vrLoadLogs()
+    }
   })
 })
 
@@ -2080,6 +2085,422 @@ async function benchLoadLogs() {
     }).join('')
   } catch (e) {
     document.getElementById('benchLogsList').innerHTML = '<p style="color:#e74c3c">加载日志失败</p>'
+  }
+}
+
+const VR_ACTION_LABELS = {
+  occupy: '占用', preoccupy: '预占', release: '释放',
+  takeover: '接管', update: '更新', undo: '撤销',
+  import: '导入', export: '导出', reconcile: '一致性恢复'
+}
+const VR_SOURCE_LABELS = {
+  create: '草稿创建', duplicate: '草稿复制', import: '草稿导入',
+  update: '草稿更新', manual: '手动登记'
+}
+
+async function vrRefresh() {
+  try {
+    const version = document.getElementById('vrFilterVersion').value
+    const status = document.getElementById('vrFilterStatus').value
+    const params = new URLSearchParams()
+    if (version) params.set('version', version)
+    if (status) params.set('status', status)
+    const qs = params.toString()
+    const result = await api('/api/version-registry' + (qs ? '?' + qs : ''), 'GET')
+    const entries = result.entries || []
+    const el = document.getElementById('vrEntriesList')
+    if (entries.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无版本占用记录</p>'
+      return
+    }
+    el.innerHTML = entries.map(e => {
+      const statusBadge = e.status === 'preoccupied'
+        ? '<span class="badge badge-warning">预占</span>'
+        : '<span class="badge badge-success">已占用</span>'
+      const sourceLabel = VR_SOURCE_LABELS[e.sourceAction] || e.sourceAction || '未知'
+      const historyPreview = e.history && e.history.length > 0
+        ? `<small style="color:#666">历史: ${e.history.length} 条记录</small>`
+        : '<small style="color:#999">无历史记录</small>'
+      return `
+        <div class="log-item" style="margin-bottom:8px;border:1px solid #eee;padding:12px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+            <div style="flex:1">
+              <div style="font-weight:bold;font-size:15px">
+                ${statusBadge} <span style="margin-left:6px">${escHtml(e.version)}</span>
+                <small style="color:#666;margin-left:8px">来源: ${escHtml(sourceLabel)}</small>
+              </div>
+              <div style="margin-top:6px;color:#555;font-size:13px">
+                占用者: ${escHtml(e.userName)} (${escHtml(e.userId)})
+              </div>
+              <div style="margin-top:4px;color:#555;font-size:13px">
+                关联草稿: ${e.draftName ? escHtml(e.draftName) : '<span style="color:#999">(无)</span>'}
+                ${e.draftId ? ` <small style="color:#999">(${escHtml(shortId(e.draftId))})</small>` : ''}
+              </div>
+              <div style="margin-top:4px;color:#888;font-size:12px">
+                创建: ${escHtml(e.createdAt)} | 更新: ${escHtml(e.updatedAt)}
+              </div>
+              <div style="margin-top:4px">
+                ${historyPreview}
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <button class="secondary" style="padding:4px 10px;font-size:12px" onclick="vrShowEntry('${encodeURIComponent(e.version)}')">详情</button>
+              <button class="danger" style="padding:4px 10px;font-size:12px" onclick="vrQuickRelease('${encodeURIComponent(e.version)}')">释放</button>
+            </div>
+          </div>
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    document.getElementById('vrEntriesList').innerHTML = '<p style="color:#e74c3c">加载失败: ' + escHtml(e.message) + '</p>'
+  }
+}
+
+async function vrShowEntry(encodedVersion) {
+  try {
+    const version = decodeURIComponent(encodedVersion)
+    const result = await api('/api/version-registry/' + encodedVersion, 'GET')
+    const entry = result.entry
+    if (!entry) {
+      alert('版本 ' + version + ' 未被占用')
+      return
+    }
+    const history = (entry.history || []).slice().reverse()
+    const historyHtml = history.length > 0
+      ? history.map((h, i) => {
+          const lbl = VR_ACTION_LABELS[h.action] || h.action
+          let extra = ''
+          if (h.reason) extra += `<br>理由: ${escHtml(h.reason)}`
+          if (h.previousVersion) extra += `<br>版本变更: ${escHtml(h.previousVersion)} → ${escHtml(h.newVersion)}`
+          return `
+            <div class="log-item">
+              <span class="log-action">[${lbl}]</span>
+              <span class="log-name">${escHtml(h.userName || h.userId || '(系统)')}</span>
+              <span class="log-time">${escHtml(h.timestamp)}</span>
+              ${extra}
+            </div>
+          `
+        }).join('')
+      : '<p style="color:#999">无历史记录</p>'
+
+    const modal = document.createElement('div')
+    modal.className = 'modal'
+    modal.style.display = 'block'
+    modal.innerHTML = `
+      <div class="modal-content modal-large">
+        <span class="modal-close">&times;</span>
+        <h3>版本 ${escHtml(entry.version)} 登记详情</h3>
+        <div style="margin-top:12px">
+          <p><strong>状态:</strong> ${entry.status === 'preoccupied' ? '预占' : '已占用'}</p>
+          <p><strong>登记ID:</strong> ${escHtml(entry.id)}</p>
+          <p><strong>占用者:</strong> ${escHtml(entry.userName)} (${escHtml(entry.userId)})</p>
+          <p><strong>来源动作:</strong> ${escHtml(VR_SOURCE_LABELS[entry.sourceAction] || entry.sourceAction || '未知')}</p>
+          <p><strong>关联草稿:</strong> ${entry.draftName ? escHtml(entry.draftName) : '(无)'} ${entry.draftId ? '(' + escHtml(entry.draftId) + ')' : ''}</p>
+          <p><strong>创建时间:</strong> ${escHtml(entry.createdAt)}</p>
+          <p><strong>最近更新:</strong> ${escHtml(entry.updatedAt)}</p>
+          <h4 style="margin-top:16px">处理记录</h4>
+          <div style="max-height:250px;overflow-y:auto">${historyHtml}</div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('.modal-close').onclick = () => document.body.removeChild(modal)
+    modal.onclick = (ev) => { if (ev.target === modal) document.body.removeChild(modal) }
+  } catch (e) {
+    alert('查看详情失败: ' + e.message)
+  }
+}
+
+async function vrQuickRelease(encodedVersion) {
+  const version = decodeURIComponent(encodedVersion)
+  if (!confirm('确认要释放版本 ' + version + ' 吗？')) return
+  document.getElementById('vrReleaseVersion').value = version
+  document.getElementById('vrReleaseAdmin').checked = true
+  document.getElementById('vrReleaseReason').value = '通过列表手动释放'
+  await vrRelease()
+}
+
+async function vrCheck() {
+  const version = document.getElementById('vrCheckVersion').value.trim()
+  if (!version) {
+    showResult('vrCheckResult', '请输入版本号', 'warning')
+    return
+  }
+  try {
+    const result = await api('/api/version-registry/check', 'POST', { version })
+    if (result.available) {
+      let msg = `版本 ${version} 可用`
+      if (result.selfOccupied) msg = `版本 ${version} 可使用（当前用户已占用）`
+      showResult('vrCheckResult', msg, 'success')
+    } else {
+      let msg = `版本 ${version} 已被占用\n占用者: ${result.occupier}\n来源: ${result.sourceAction || '未知'}\n草稿: ${result.draftName || '未知'}`
+      showResult('vrCheckResult', msg, 'error')
+    }
+  } catch (e) {
+    showResult('vrCheckResult', '检查失败: ' + e.message, 'error')
+  }
+}
+
+async function vrPreoccupy() {
+  const version = document.getElementById('vrPreoccupyVersion').value.trim()
+  if (!version) {
+    showResult('vrPreoccupyResult', '请输入版本号', 'warning')
+    return
+  }
+  try {
+    const result = await api('/api/version-registry/preoccupy', 'POST', {
+      version,
+      draftName: document.getElementById('vrPreoccupyDraftName').value.trim() || undefined,
+      userName: document.getElementById('vrPreoccupyUser').value.trim() || undefined,
+      userId: document.getElementById('vrPreoccupyUser').value.trim() || undefined
+    })
+    if (result.success) {
+      showResult('vrPreoccupyResult', `已预占版本 ${version}，登记ID: ${result.entry.id}`, 'success')
+      document.getElementById('vrPreoccupyVersion').value = ''
+      document.getElementById('vrPreoccupyDraftName').value = ''
+      document.getElementById('vrPreoccupyUser').value = ''
+      vrRefresh()
+    } else {
+      showResult('vrPreoccupyResult', '预占失败', 'error')
+    }
+  } catch (e) {
+    showResult('vrPreoccupyResult', '预占失败: ' + e.message, 'error')
+  }
+}
+
+async function vrRelease() {
+  const version = document.getElementById('vrReleaseVersion').value.trim()
+  if (!version) {
+    showResult('vrReleaseResult', '请输入版本号', 'warning')
+    return
+  }
+  if (!document.getElementById('vrReleaseAdmin').checked) {
+    if (!confirm('非管理员模式释放，只能释放自己的占用。确定要继续吗？')) return
+  }
+  try {
+    const result = await api('/api/version-registry/release', 'POST', {
+      version,
+      isAdmin: document.getElementById('vrReleaseAdmin').checked,
+      reason: document.getElementById('vrReleaseReason').value.trim() || undefined
+    })
+    if (result.success) {
+      showResult('vrReleaseResult', `已释放版本 ${version}`, 'success')
+      document.getElementById('vrReleaseVersion').value = ''
+      document.getElementById('vrReleaseReason').value = ''
+      document.getElementById('vrReleaseAdmin').checked = false
+      vrRefresh()
+      vrLoadLogs()
+      vrPeekUndo()
+    } else {
+      showResult('vrReleaseResult', '释放失败', 'error')
+    }
+  } catch (e) {
+    showResult('vrReleaseResult', '释放失败: ' + e.message, 'error')
+  }
+}
+
+async function vrTakeover() {
+  const version = document.getElementById('vrTakeoverVersion').value.trim()
+  const reason = document.getElementById('vrTakeoverReason').value.trim()
+  if (!version) {
+    showResult('vrTakeoverResult', '请输入版本号', 'warning')
+    return
+  }
+  if (!reason) {
+    showResult('vrTakeoverResult', '必须填写接管理由', 'warning')
+    return
+  }
+  try {
+    const result = await api('/api/version-registry/takeover', 'POST', {
+      version,
+      reason,
+      userName: document.getElementById('vrTakeoverUser').value.trim() || undefined,
+      userId: document.getElementById('vrTakeoverUser').value.trim() || undefined
+    })
+    if (result.success) {
+      const msg = result.tookOver
+        ? `已成功接管版本 ${version}`
+        : `已登记版本 ${version}（无冲突，直接占用）`
+      showResult('vrTakeoverResult', msg, 'success')
+      document.getElementById('vrTakeoverVersion').value = ''
+      document.getElementById('vrTakeoverReason').value = ''
+      document.getElementById('vrTakeoverUser').value = ''
+      vrRefresh()
+      vrLoadLogs()
+      vrPeekUndo()
+    } else {
+      showResult('vrTakeoverResult', '接管失败', 'error')
+    }
+  } catch (e) {
+    showResult('vrTakeoverResult', '接管失败: ' + e.message, 'error')
+  }
+}
+
+async function vrLoadLogs() {
+  try {
+    const result = await api('/api/version-registry/logs?limit=30', 'GET')
+    const logs = result.logs || []
+    const el = document.getElementById('vrLogsList')
+    if (logs.length === 0) {
+      el.innerHTML = '<p style="color:#999">暂无操作日志</p>'
+      return
+    }
+    el.innerHTML = logs.map(l => {
+      const lbl = VR_ACTION_LABELS[l.action] || l.action
+      let desc = l.description || ''
+      if (l.draftName) desc += (desc ? ' | ' : '') + '草稿: ' + l.draftName
+      if (l.reason) desc += (desc ? ' | ' : '') + '理由: ' + l.reason
+      if (l.importedCount !== undefined) desc += (desc ? ' | ' : '') + `导入:${l.importedCount} 跳过:${l.skipped || 0} 冲突:${l.conflictCount || 0}`
+      if (l.staleRemoved !== undefined) desc += (desc ? ' | ' : '') + `清理:${l.staleRemoved} 恢复:${l.missingRestored || 0}`
+      return `
+        <div class="log-item">
+          <span class="log-action">[${lbl}]</span>
+          <span class="log-name">${l.version ? '版本: ' + escHtml(l.version) : ''} ${escHtml(desc)}</span>
+          <span class="log-time">${escHtml(l.timestamp || '')}</span>
+          ${l.userName ? '<span class="log-name" style="color:#888">' + escHtml(l.userName) + '</span>' : ''}
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    document.getElementById('vrLogsList').innerHTML = '<p style="color:#e74c3c">加载日志失败: ' + escHtml(e.message) + '</p>'
+  }
+}
+
+async function vrPeekUndo() {
+  try {
+    const snap = await api('/api/version-registry/undo/peek', 'GET')
+    const el = document.getElementById('vrUndoInfo')
+    if (!snap) {
+      el.textContent = '没有可撤销的操作'
+    } else {
+      const lbl = VR_ACTION_LABELS[snap.action] || snap.action
+      el.textContent = `可撤销: [${lbl}] ${snap.version} - ${snap.description || ''} (${snap.timestamp})`
+    }
+  } catch (e) {
+    document.getElementById('vrUndoInfo').textContent = '检查可撤销操作失败: ' + e.message
+  }
+}
+
+async function vrUndo() {
+  try {
+    const result = await api('/api/version-registry/undo', 'POST', {})
+    if (result.success) {
+      const lbl = VR_ACTION_LABELS[result.action] || result.action
+      showResult('vrResult', `已撤销: [${lbl}] ${result.version} - ${result.description || ''}`, 'success')
+      vrRefresh()
+      vrLoadLogs()
+      vrPeekUndo()
+    } else {
+      showResult('vrResult', `撤销失败: ${result.reason || '未知错误'}`, 'error')
+    }
+  } catch (e) {
+    showResult('vrResult', '撤销失败: ' + e.message, 'error')
+  }
+}
+
+async function vrReconcile() {
+  try {
+    const result = await api('/api/version-registry/reconcile', 'POST', {})
+    let msg = `一致性校验完成\n清理陈旧: ${result.staleRemoved || 0} 条\n恢复缺失: ${result.missingRestored || 0} 条`
+    if (result.conflicts) msg += `\n冲突: ${result.conflicts}`
+    showResult('vrResult', msg, result.staleRemoved > 0 || result.missingRestored > 0 ? 'warning' : 'success')
+    vrRefresh()
+    vrLoadLogs()
+    vrPeekUndo()
+  } catch (e) {
+    showResult('vrResult', '校验失败: ' + e.message, 'error')
+  }
+}
+
+async function vrShowExportJson() {
+  try {
+    const data = await api('/api/version-registry/export', 'POST', {})
+    const json = JSON.stringify(data, null, 2)
+    const modal = document.createElement('div')
+    modal.className = 'modal'
+    modal.style.display = 'block'
+    modal.innerHTML = `
+      <div class="modal-content modal-large">
+        <span class="modal-close">&times;</span>
+        <h3>版本登记 JSON</h3>
+        <textarea rows="15" style="width:100%;font-family:monospace;font-size:12px">${escHtml(json)}</textarea>
+      </div>
+    `
+    document.body.appendChild(modal)
+    modal.querySelector('.modal-close').onclick = () => document.body.removeChild(modal)
+    modal.onclick = (ev) => { if (ev.target === modal) document.body.removeChild(modal) }
+  } catch (e) {
+    showResult('vrExportResult', '导出失败: ' + e.message, 'error')
+  }
+}
+
+async function vrExportJson() {
+  try {
+    const data = await api('/api/version-registry/export', 'POST', {})
+    const json = JSON.stringify(data, null, 2)
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'version-registry-' + new Date().toISOString().slice(0, 10) + '.json'
+    a.click()
+    URL.revokeObjectURL(url)
+    showResult('vrExportResult', '导出完成', 'success')
+  } catch (e) {
+    showResult('vrExportResult', '导出失败: ' + e.message, 'error')
+  }
+}
+
+function readVrImportFile() {
+  return new Promise((resolve, reject) => {
+    const fileInput = document.getElementById('vrImportFile')
+    if (!fileInput.files || fileInput.files.length === 0) return resolve(null)
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        resolve(JSON.parse(e.target.result))
+      } catch (err) {
+        reject(new Error('JSON 解析失败: ' + err.message))
+      }
+    }
+    reader.onerror = (e) => reject(e)
+    reader.readAsText(fileInput.files[0])
+  })
+}
+
+async function vrImport() {
+  try {
+    let registryData = await readVrImportFile()
+    const jsonText = document.getElementById('vrImportJson').value.trim()
+    if (!registryData && jsonText) {
+      try {
+        registryData = JSON.parse(jsonText)
+      } catch (e) {
+        showResult('vrImportResult', 'JSON 格式错误: ' + e.message, 'error')
+        return
+      }
+    }
+    if (!registryData) {
+      showResult('vrImportResult', '请选择文件或粘贴 JSON 内容', 'warning')
+      return
+    }
+    const result = await api('/api/version-registry/import', 'POST', {
+      registryData,
+      force: document.getElementById('vrImportForce').checked
+    })
+    let msg = `导入完成: 成功 ${result.importedCount} 条, 跳过 ${result.skipped} 条`
+    if (result.conflictCount > 0) msg += `, 冲突 ${result.conflictCount} 条`
+    showResult('vrImportResult', msg, result.conflictCount > 0 && !document.getElementById('vrImportForce').checked ? 'warning' : 'success')
+    if (result.conflicts && result.conflicts.length > 0) {
+      showResult('vrImportResult', msg + '\n冲突版本: ' + result.conflicts.join(', '), 'warning')
+    }
+    vrRefresh()
+    vrLoadLogs()
+    vrPeekUndo()
+    document.getElementById('vrImportJson').value = ''
+    document.getElementById('vrImportFile').value = ''
+  } catch (e) {
+    showResult('vrImportResult', '导入失败: ' + e.message, 'error')
   }
 }
 

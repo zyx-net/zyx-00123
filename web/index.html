@@ -18,6 +18,7 @@
       <button class="tab" data-tab="archive">归档</button>
       <button class="tab" data-tab="profiles">导出方案</button>
       <button class="tab" data-tab="config">配置</button>
+      <button class="tab" data-tab="version">版本占用</button>
     </nav>
   </header>
 
@@ -392,6 +393,140 @@ def5678,fix: 修复登录超时问题,李四,2025-01-16,PROJ-102,v1.2.0
       </div>
 
       <div id="configResult" class="result-box hidden"></div>
+    </section>
+
+    <section id="tab-version" class="tab-content">
+      <h2>版本占用登记中心</h2>
+      <p class="hint" style="margin-bottom:12px">集中管理所有版本号的占用状态。创建、复制、导入草稿前均需在此校验版本号；普通用户撞上同版本时只能改版本、改名或取消，管理员可带理由强制接管。</p>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin-bottom:0">版本占用列表</h3>
+          <div>
+            <button onclick="vrRefresh()" class="secondary">刷新</button>
+            <button onclick="vrReconcile()" class="secondary">校验一致性</button>
+          </div>
+        </div>
+        <div class="filter-bar">
+          <input type="text" id="vrFilterVersion" placeholder="按版本号搜索" oninput="vrRefresh()">
+          <select id="vrFilterStatus" onchange="vrRefresh()">
+            <option value="">全部状态</option>
+            <option value="occupied">已占用</option>
+            <option value="preoccupied">预占</option>
+          </select>
+        </div>
+        <div id="vrEntriesList" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card">
+        <h3>快速操作</h3>
+        <div class="card-row">
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>检查版本可用性</h4>
+            <div class="form-group">
+              <input type="text" id="vrCheckVersion" placeholder="例如: v1.2.0">
+            </div>
+            <button onclick="vrCheck()">检查</button>
+            <div id="vrCheckResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>预占版本</h4>
+            <div class="form-group">
+              <label>版本号</label>
+              <input type="text" id="vrPreoccupyVersion" placeholder="例如: v1.3.0">
+            </div>
+            <div class="form-group">
+              <label>草稿名称（可选）</label>
+              <input type="text" id="vrPreoccupyDraftName" placeholder="关联的草稿名称">
+            </div>
+            <div class="form-group">
+              <label>用户名（可选）</label>
+              <input type="text" id="vrPreoccupyUser" placeholder="留空默认为匿名">
+            </div>
+            <button onclick="vrPreoccupy()">预占</button>
+            <div id="vrPreoccupyResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+        </div>
+        <div class="card-row">
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>释放版本</h4>
+            <div class="form-group">
+              <label>版本号</label>
+              <input type="text" id="vrReleaseVersion" placeholder="例如: v1.2.0">
+            </div>
+            <div class="form-group">
+              <label>释放理由（可选）</label>
+              <input type="text" id="vrReleaseReason" placeholder="为什么释放">
+            </div>
+            <div class="form-group">
+              <label><input type="checkbox" id="vrReleaseAdmin"> 管理员强制释放</label>
+            </div>
+            <button onclick="vrRelease()" class="danger">释放</button>
+            <div id="vrReleaseResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>管理员接管</h4>
+            <div class="form-group">
+              <label>版本号 <span style="color:#e74c3c">*</span></label>
+              <input type="text" id="vrTakeoverVersion" placeholder="例如: v1.2.0">
+            </div>
+            <div class="form-group">
+              <label>接管理由 <span style="color:#e74c3c">*</span></label>
+              <input type="text" id="vrTakeoverReason" placeholder="为什么要接管">
+            </div>
+            <div class="form-group">
+              <label>用户名（可选）</label>
+              <input type="text" id="vrTakeoverUser" placeholder="留空默认为管理员">
+            </div>
+            <button onclick="vrTakeover()" class="danger">强制接管</button>
+            <div id="vrTakeoverResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <h3 style="margin-bottom:0">操作日志与撤销</h3>
+          <div>
+            <button onclick="vrLoadLogs()" class="secondary">刷新日志</button>
+            <button onclick="vrPeekUndo()" class="secondary">查看可撤销</button>
+            <button onclick="vrUndo()" class="danger">撤销最近操作</button>
+          </div>
+        </div>
+        <div id="vrUndoInfo" style="margin-bottom:10px;color:#666;font-size:13px">检查中...</div>
+        <div id="vrLogsList" style="max-height:250px;overflow-y:auto"></div>
+      </div>
+
+      <div class="card">
+        <h3>JSON 导入导出</h3>
+        <div class="card-row">
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>导出</h4>
+            <p class="hint">导出所有版本占用登记数据为 JSON 文件</p>
+            <button onclick="vrExportJson()">下载 JSON</button>
+            <button onclick="vrShowExportJson()" class="secondary">显示 JSON</button>
+            <div id="vrExportResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+          <div class="card" style="box-shadow:none;margin:0">
+            <h4>导入</h4>
+            <div class="form-group">
+              <label>选择 JSON 文件</label>
+              <input type="file" id="vrImportFile" accept=".json,application/json">
+            </div>
+            <div class="form-group">
+              <label>或粘贴 JSON 内容</label>
+              <textarea id="vrImportJson" rows="4" placeholder='{"schemaVersion":1,"entries":[...]}'></textarea>
+            </div>
+            <div class="form-group">
+              <label><input type="checkbox" id="vrImportForce"> 冲突版本强制覆盖</label>
+            </div>
+            <button onclick="vrImport()">导入</button>
+            <div id="vrImportResult" class="result-box hidden" style="margin-top:8px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="vrResult" class="result-box hidden"></div>
     </section>
   </main>
 
